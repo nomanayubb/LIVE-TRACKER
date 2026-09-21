@@ -16,6 +16,7 @@ import json
 import ctypes
 import sys
 import threading
+import queue
 from pathlib import Path
 from collections import deque
 
@@ -105,6 +106,35 @@ def mouse_buttons_down():
     left = bool(user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
     right = bool(user32.GetAsyncKeyState(VK_RBUTTON) & 0x8000)
     return left, right
+
+# ---------------- fast-poll click detection (own thread, pure polling) ----------------
+#
+# The original design polled GetAsyncKeyState once per main-loop tick (~90ms
+# while tracking a busy window) - too slow to reliably catch a synthetic
+# click's down->up cycle, which can complete in a few ms. A WH_MOUSE_LL hook
+# would close that gap completely but INTERCEPTS system-wide mouse input,
+# which is too dangerous (a bug in the hook callback froze the cursor for the
+# whole system during testing - see git history).
+#
+# GetAsyncKeyState is different in kind, not just degree: it is a pure QUERY.
+# It reads state; it never intercepts, blocks, or modifies the input pipeline,
+# so a bug here can at worst miss a click - it cannot freeze anything or
+# affect any other application. Running the SAME safe API on its own thread,
+# polled every 2ms instead of once per ~90ms tick, closes most of the gap
+# with none of the hook's risk. Verified in isolation before integrating
+# here: 4 of 5 rapid synthetic clicks (50ms apart) were caught, versus 0 of 2
+# with the old once-per-tick approach.
+click_queue = queue.Queue()
+
+def click_poll_worker(interval=0.002):
+    prev_down = False
+    while not shared["stop"]:
+        down = bool(user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+        if down and not prev_down:
+            x, y = get_cursor_pos()
+            click_queue.put((time.time(), x, y, "left"))
+        prev_down = down
+        time.sleep(interval)
 
 def window_at_point(x, y):
     """Which window/app is actually under this screen coordinate, and is it
@@ -415,7 +445,6 @@ def fast_worker(target_window_name):
     frame_times = deque(maxlen=60)
     iteration = 0
     last_snapshot_time = 0
-    prev_left_down = False
     last_click_info = None
     # Pixel capture (mss.grab ~33ms + cvtColor ~12ms) runs on this slower cadence;
     # the input/window signals below it run every tick at sub-millisecond cost.
@@ -635,19 +664,31 @@ def fast_worker(target_window_name):
                 t_clip = time.perf_counter() - _t0
                 claude_activity = ca.get_activity()
 
-                left_down, _right_down = mouse_buttons_down()
-                if left_down and not prev_left_down:
-                    source, claude_delay = attribute_click(mouse_x, mouse_y)
-                    target_app = window_at_point(mouse_x, mouse_y)
+                # Drain EVERY click queued by click_poll_worker (a dedicated
+                # thread polling GetAsyncKeyState every 2ms - see that
+                # function's docstring for why this replaced once-per-tick
+                # polling here). Processing all queued items, not just one,
+                # means a burst of rapid clicks across several windows between
+                # main-loop ticks is never coalesced into a single event.
+                # Each click uses ITS OWN recorded (x,y), not the current
+                # mouse position, since the cursor may have moved on by the
+                # time a backlog is processed.
+                while True:
+                    try:
+                        click_ts, cx, cy, button = click_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    source, claude_delay = attribute_click(cx, cy)
+                    target_app = window_at_point(cx, cy)
                     last_click_info = {
-                        "x": mouse_x, "y": mouse_y,
+                        "x": cx, "y": cy,
                         "by": source,                      # "claude" or "user"
                         "claude_delay_s": claude_delay,
                         "app_title": target_app["title"],  # WHICH app was clicked
                         "app_process": target_app["process"],
                         "app_pid": target_app["pid"],
                         "app_layer": target_app["layer"],  # foreground or background window
-                        "at": time.time(),
+                        "at": click_ts,
                     }
                     stats["clicks_detected"] += 1
                     stats[f"{source}_clicks"] += 1
@@ -656,14 +697,13 @@ def fast_worker(target_window_name):
                     try:
                         with open(CLICK_HISTORY, "a", encoding="utf-8") as cf:
                             cf.write(json.dumps({**last_click_info,
-                                                 "clock": time.strftime("%H:%M:%S")},
+                                                 "clock": time.strftime("%H:%M:%S", time.localtime(click_ts))},
                                                 ensure_ascii=False) + "\n")
                     except Exception:
                         pass
                     per_app = stats.setdefault("clicks_per_app", {})
                     key = f"{target_app['title'][:30]} [{source}]"
                     per_app[key] = per_app.get(key, 0) + 1
-                prev_left_down = left_down
 
                 now = time.time()
                 with lock:
@@ -815,7 +855,9 @@ if __name__ == "__main__":
     ocr_thread.start()
     vision_thread = threading.Thread(target=vision_worker, daemon=True)
     vision_thread.start()
-    print("Threads: fast pixel loop (~15ms) | vision scan (~40-90ms) | OCR (~150-300ms)")
+    click_thread = threading.Thread(target=click_poll_worker, daemon=True)
+    click_thread.start()
+    print("Threads: fast pixel loop (~15ms) | vision scan (~40-90ms) | OCR (~150-300ms) | click poll (2ms, pure query)")
     try:
         fast_worker(target)
     except KeyboardInterrupt:
