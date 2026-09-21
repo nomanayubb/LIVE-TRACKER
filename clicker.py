@@ -277,27 +277,23 @@ class Clicker:
         accurate, the app edits them afterwards). If exact text matters, read it
         back (clipboard or OCR) and compare rather than assuming it landed."""
         win = self._guard(f"type {text[:30]!r}")
-        toggled = False
+        compensated = False
         try:
+            send = text
             if fix_capslock and self._capslock_on():
-                pyautogui.press("capslock")
-                # Poll until the OS actually reports the new state. A fixed short
-                # sleep was not enough - typing began before the toggle landed, so
-                # the first few characters still came out inverted ('MiXeD Case'
-                # arrived as 'Mixed case') while the rest was correct.
-                for _ in range(40):
-                    if not self._capslock_on():
-                        toggled = True
-                        break
-                    time.sleep(0.02)
-                time.sleep(0.05)   # small settle after the state flips
-            pyautogui.typewrite(text, interval=interval)
+                # Compensate in software rather than toggling the user's CapsLock.
+                # Pressing capslock would change a physical keyboard state they
+                # control - and if they happen to be typing at that moment, it
+                # corrupts THEIR input. Inverting the string instead means
+                # CapsLock inverts it back and the right text lands, with their
+                # keyboard left exactly as they set it.
+                send = text.swapcase()
+                compensated = True
+            pyautogui.typewrite(send, interval=interval)
             time.sleep(0.15)
-            return {"ok": True, "typed": text, "capslock_corrected": toggled,
+            return {"ok": True, "typed": text, "capslock_compensated": compensated,
                     "after": self._shot("typed")}
         finally:
-            if toggled:                      # leave the keyboard as we found it
-                pyautogui.press("capslock")
             self._done()
 
     def press(self, *keys, presses=1):
