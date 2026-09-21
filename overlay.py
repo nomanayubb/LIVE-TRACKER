@@ -9,16 +9,22 @@ ctypes.windll.user32.SetProcessDPIAware()  # same fix as admin_panel.py - withou
 # it, dragging this window can desync between where it visually is and where
 # Windows delivers the drag's mouse input.
 
+import json
 import tkinter as tk
 from pathlib import Path
 
-STATE_FILE = Path(__file__).resolve().parent / ".live_screen_state.txt"
+BASE_DIR = Path(__file__).resolve().parent
+STATE_FILE = BASE_DIR / ".live_screen_state.txt"
+STATE_JSON = BASE_DIR / ".live_screen_state.json"
+CLICK_HISTORY = BASE_DIR / ".tracker_click_history.jsonl"
 
 root = tk.Tk()
 root.title("Tracker Overlay")
 root.attributes("-topmost", True)
 root.overrideredirect(True)  # no title bar, borderless
-root.geometry("500x290+20+20")  # small, top-left corner
+# Heightened from 290 to fit the added click-attribution + recent-clicks
+# block (up to 6 history lines) without truncating.
+root.geometry("560x440+20+20")  # top-left corner
 root.configure(bg="#111111")
 
 label = tk.Label(
@@ -40,6 +46,14 @@ def do_move(event):
 
 label.bind("<Button-1>", start_move)
 label.bind("<B1-Motion>", do_move)
+
+# No title bar (overrideredirect) means no X button and Windows gives no
+# other built-in way to close this - confirmed there was no close binding at
+# all before this, so the only option was killing the process from a
+# terminal. Double-click is the common convention for borderless overlay
+# windows; Escape also closes it if the overlay has focus.
+label.bind("<Double-Button-1>", lambda e: root.destroy())
+root.bind("<Escape>", lambda e: root.destroy())
 
 def parse_field(text, name):
     for line in text.splitlines():
@@ -70,6 +84,34 @@ def refresh():
         bbox = parse_field(content, "FRAME_CHANGE_BBOX")
         match = "YES" if fg == target else "no"
 
+        # Click attribution: read the structured JSON rather than parsing the
+        # .txt file's Python-dict-repr string for LAST_CLICK, which is fragile.
+        # This was previously computed by the tracker but never shown on the
+        # overlay at all - confirmed by reading the old version of this file.
+        last_click_line = "Last click : -"
+        try:
+            state = json.loads(STATE_JSON.read_text(encoding="utf-8"))
+            lc = state.get("last_click")
+            if lc:
+                who = "YOU" if lc["by"] == "user" else "CLAUDE"
+                last_click_line = (f"Last click : {who} -> {lc['app_title'][:28]} "
+                                   f"({lc['x']},{lc['y']}) [{lc['app_layer']}]")
+        except Exception:
+            pass
+
+        # Recent clicks across multiple windows, newest first - so attribution
+        # is visible per-window, not just the single latest click.
+        recent_lines = []
+        try:
+            lines = CLICK_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for line in reversed(lines[-6:]):
+                e = json.loads(line)
+                who = "you" if e["by"] == "user" else "CLAUDE"
+                recent_lines.append(f"  {e.get('clock','')} {who:6s} -> {e['app_title'][:22]}")
+        except Exception:
+            pass
+        recent_block = "\n".join(recent_lines) if recent_lines else "  (none yet)"
+
         display = (
             f"LIVE (iter {iteration})  pixel loop: {loop_ms}ms (avg {avg_loop_ms}ms)\n"
             f"Foreground : {fg}\n"
@@ -79,7 +121,9 @@ def refresh():
             f"Mouse: {mouse}   Idle: {idle}s   Res: {resolution}\n"
             f"Brightness: {brightness}  Color: {dom_color}\n"
             f"Change: {change_pct}%  bbox={bbox}  Blobs: {blobs}\n"
-            f"New text: {new_text[:50] if new_text != '?' else '-'}"
+            f"New text: {new_text[:50] if new_text != '?' else '-'}\n"
+            f"{last_click_line}\n"
+            f"Recent clicks (who -> which window):\n{recent_block}"
         )
         label.config(text=display)
     except Exception as e:
