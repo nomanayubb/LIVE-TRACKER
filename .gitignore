@@ -38,3 +38,7 @@ tracker_snapshots/
 .tracker_precision
 .tracker_change_history.jsonl
 .live_frame.*
+.tracker_frame_log.jsonl
+replay_out/
+clicker_shots/
+rebuilt_from_grid*.jpg

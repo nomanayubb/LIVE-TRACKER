@@ -595,7 +595,7 @@ def fast_worker(target_window_name):
                     time.sleep(0.005)
                     continue
                 dom_color = dominant_color(img)
-                grid = pixel_grid_matrix(img)
+                grid = pixel_grid_matrix(img, g_cols, g_rows)
                 blob_count, blob_center = detect_selection_outline(img)
                 mouse_x, mouse_y = get_cursor_pos()
                 idle_s = get_idle_seconds()
