@@ -158,8 +158,14 @@ def window_at_point(x, y):
         length = user32.GetWindowTextLengthW(root_hwnd)
         buf = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(root_hwnd, buf, length + 1)
-        title = buf.value or "Untitled"
         proc, pid = get_process_name_for_hwnd(root_hwnd)
+        # Many windows genuinely have no Win32 title text - confirmed common
+        # for modern File Explorer frames and various background/system
+        # windows (GetWindowText returns "" for them; their visible name, if
+        # any, comes from a different UI layer entirely). "Untitled" told the
+        # user nothing useful there. The process name at least says WHAT
+        # clicked, even when Windows has no title string to offer for it.
+        title = buf.value or f"({proc})"
         fg_hwnd = user32.GetForegroundWindow()
         layer = "foreground" if root_hwnd == fg_hwnd else "background"
         return {"title": title, "process": proc, "pid": pid, "layer": layer}
