@@ -43,6 +43,7 @@ PROFILE = False   # set False to silence the per-section timing breakdown
 PAUSE_SWITCH = BASE_DIR / ".tracker_paused"          # create this file to instantly pause all capture/reporting
 DENIED_WINDOWS_FILE = BASE_DIR / ".tracker_denied_windows.txt"  # one window-title substring per line = never reported
 STATS_FILE = BASE_DIR / ".tracker_stats.json"
+CLICK_HISTORY = BASE_DIR / ".tracker_click_history.jsonl"   # every click, persisted
 CHANGE_HISTORY = BASE_DIR / ".tracker_change_history.jsonl"  # append-only log of what
 # text appeared/disappeared on screen over time - a replayable record, not just a snapshot
 MAX_SNAPSHOTS = 60
@@ -620,6 +621,15 @@ def fast_worker(target_window_name):
                     }
                     stats["clicks_detected"] += 1
                     stats[f"{source}_clicks"] += 1
+                    # Persist every click - the live state file is overwritten
+                    # constantly, so without this the event is gone within ms.
+                    try:
+                        with open(CLICK_HISTORY, "a", encoding="utf-8") as cf:
+                            cf.write(json.dumps({**last_click_info,
+                                                 "clock": time.strftime("%H:%M:%S")},
+                                                ensure_ascii=False) + "\n")
+                    except Exception:
+                        pass
                     per_app = stats.setdefault("clicks_per_app", {})
                     key = f"{target_app['title'][:30]} [{source}]"
                     per_app[key] = per_app.get(key, 0) + 1

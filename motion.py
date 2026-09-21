@@ -189,6 +189,55 @@ class RegionCapture:
         m3 = cv2.cvtColor(cv2.GaussianBlur(mask, (21, 21), 0), cv2.COLOR_GRAY2BGR) / 255.0
         return np.clip(sharp * (1 - m3) + blurred * m3, 0, 255).astype(np.uint8)
 
+    def record_video(self, path=None, duration=10, fps=None, blur=None,
+                     blur_frames=5, progress=True):
+        """Record the region straight to a video file, live.
+
+        Frames are written as they are captured, so nothing is reconstructed
+        and nothing is lost to compression of a summary - this is the real
+        pixels at full region resolution.
+
+        blur: None | 'accumulate' | 'directional' | 'selective' - applies the
+        blur per frame as it records, so the output video is already processed
+        (no second pass needed).
+        """
+        if not self._thread or not self._thread.is_alive():
+            self.start()
+        path = Path(path) if path else (OUT_DIR / f"capture_{int(time.time())}.mp4")
+        # If fps isn't given, use the rate actually being achieved so playback
+        # runs at true speed rather than fast/slow motion.
+        time.sleep(0.5)
+        target_fps = fps or max(5.0, self.fps or 20.0)
+        w, h = self.monitor["width"], self.monitor["height"]
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"),
+                                 target_fps, (w, h))
+        if not writer.isOpened():
+            raise RuntimeError(f"Could not open video writer for {path}")
+
+        blur_fn = {"accumulate": lambda: self.motion_blur(blur_frames),
+                   "directional": lambda: self.directional_blur(),
+                   "selective": lambda: self.selective_blur(blur_frames)}.get(blur)
+
+        end = time.time() + duration
+        written, last_ts = 0, None
+        interval = 1.0 / target_fps
+        while time.time() < end:
+            with self.lock:
+                item = self.frames[-1] if self.frames else None
+            if item and item[0] != last_ts:
+                last_ts = item[0]
+                frame = blur_fn() if blur_fn else item[1]
+                if frame is not None and frame.shape[:2] == (h, w):
+                    writer.write(frame)
+                    written += 1
+            time.sleep(interval * 0.4)
+        writer.release()
+        if progress:
+            actual_fps = written / max(duration, 0.001)
+            print(f"wrote {written} frames ({actual_fps:.1f} fps) -> {path}")
+        return {"path": str(path), "frames": written, "fps": target_fps,
+                "size": f"{w}x{h}", "blur": blur}
+
     def stats(self):
         with self.lock:
             n = len(self.frames)
@@ -241,10 +290,26 @@ def demo(w=1280, h=720, blur_frames=5):
     print(f"saved to {OUT_DIR}")
 
 
+def video(seconds=10, w=1280, h=720, blur=None):
+    cap = RegionCapture(0, 0, w, h).start()
+    try:
+        info = cap.record_video(duration=seconds, blur=blur)
+        print("stats:", cap.stats())
+        return info
+    finally:
+        cap.stop()
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "bench"
     if cmd == "bench":
         bench()
+    elif cmd == "video":
+        # python motion.py video 10 1280 720 selective
+        video(int(sys.argv[2]) if len(sys.argv) > 2 else 10,
+              int(sys.argv[3]) if len(sys.argv) > 3 else 1280,
+              int(sys.argv[4]) if len(sys.argv) > 4 else 720,
+              sys.argv[5] if len(sys.argv) > 5 else None)
     else:
         demo(int(sys.argv[2]) if len(sys.argv) > 2 else 1280,
              int(sys.argv[3]) if len(sys.argv) > 3 else 720,

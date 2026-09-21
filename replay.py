@@ -130,6 +130,32 @@ def sheet(count=50, cols=10, cell_w=320, cell_h=180):
     print(f"contact sheet of {len(frames)} frames in {time.time()-t0:.2f}s -> {path}")
 
 
+def video(count=200, fps=15, width=960, height=540, out=None):
+    """Convert logged frame DATA into a video file. No capture, no screenshots -
+    it reads the stored grids and encodes them straight to mp4.
+
+    Fast because each frame is a tiny grid (a few KB) upscaled by the encoder,
+    not a real image being decoded from disk."""
+    frames = _load_frames(count)
+    if not frames:
+        print("No frames logged yet - run: python replay.py record 60")
+        return
+    out = Path(out) if out else (OUT_DIR / f"replay_{int(time.time())}.mp4")
+    t0 = time.time()
+    writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"),
+                             fps, (width, height))
+    if not writer.isOpened():
+        print("Could not open video writer")
+        return
+    for entry in frames:
+        writer.write(_to_image(entry, width, height))
+    writer.release()
+    dt = time.time() - t0
+    print(f"converted {len(frames)} logged frames -> video in {dt:.2f}s "
+          f"({len(frames)/max(dt,0.001):.0f} frames/sec) -> {out}")
+    return str(out)
+
+
 def timeline(limit=40):
     """Text timeline of what actually changed - usually more informative than
     the images, since it names the text that appeared and disappeared."""
@@ -162,5 +188,7 @@ if __name__ == "__main__":
         build(arg or 50)
     elif cmd == "sheet":
         sheet(arg or 50)
+    elif cmd == "video":
+        video(arg or 200)
     else:
         timeline(arg or 40)
