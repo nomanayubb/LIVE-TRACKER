@@ -102,7 +102,7 @@ class Clicker:
         # bug silently broke multi-step sequences (click "Add", then the guard
         # for the next step closed the very menu it had just opened).
         if self._is_foreground():
-            return self._find_window()
+            return self._relatch_to_foreground()
 
         for attempt in range(tries):
             win = self._find_window()
@@ -115,17 +115,44 @@ class Clicker:
                 pass
             time.sleep(0.15)
             if self._is_foreground():
-                return self._find_window()
+                return self._relatch_to_foreground()
             try:
                 win.minimize(); win.restore()
                 time.sleep(0.4)
             except Exception:
                 pass
             if self._is_foreground():
-                return self._find_window()
+                return self._relatch_to_foreground()
         raise WindowNotReady(
             f"Could not bring '{self.window_title}' to foreground after {tries} tries "
             f"(currently foreground: '{self._foreground_title()}')")
+
+    def _relatch_to_foreground(self):
+        """Some apps register multiple windows sharing the same title
+        substring - confirmed directly: Calculator had 3 entries, one a
+        'ghost' with bounds identical to the full desktop (-9,-9,1938,1038),
+        not the real visible window (0,7,1536,816). _find_window() picks the
+        FIRST title match, which can be that ghost - and since it still
+        activates successfully (the real process does come to the
+        foreground), _is_foreground() passes even though the returned window
+        OBJECT has completely wrong coordinates. A click computed from the
+        ghost's bounds then lands somewhere else on screen entirely - in one
+        observed case, on this project's own overlay window sitting at that
+        wrong location, misattributing the click to 'Tracker Overlay'
+        instead of Calculator.
+
+        Once foreground is confirmed, re-fetch whichever window
+        GetActiveWindow() actually reports and latch onto ITS handle - that
+        is the one genuinely on top, never a ghost, regardless of which
+        entry title-matching happened to pick first."""
+        try:
+            fg = gw.getActiveWindow()
+            if fg is not None:
+                self._hwnd = getattr(fg, "_hWnd", None)
+                return fg
+        except Exception:
+            pass
+        return self._find_window()
 
     def _foreground_title(self):
         try:
@@ -196,6 +223,28 @@ class Clicker:
 
     # ---------------------------------------------------------------- clicking
 
+    # This project's own always-on-top windows. Confirmed directly: clicking
+    # a maximized app at a coordinate that happened to fall under the
+    # overlay's screen rectangle landed ON the overlay instead, since it is
+    # deliberately -topmost and genuinely is the frontmost thing there - not
+    # a window-matching bug, just an always-on-top window doing what
+    # always-on-top means. Click-through was considered and rejected: it
+    # would also disable the overlay's drag-to-move and close button, which
+    # are worth more than silently misclicking. Instead, refuse before
+    # clicking into one of these by mistake - consistent with this class's
+    # existing philosophy (WindowNotReady) of refusing over guessing wrong.
+    OWN_UI_TITLES = ("Tracker Overlay", "Tracker Admin Panel", "Settings / Reference")
+
+    def _own_ui_at(self, sx, sy):
+        try:
+            for w in gw.getAllWindows():
+                if any(t in w.title for t in self.OWN_UI_TITLES):
+                    if w.left <= sx <= w.left + w.width and w.top <= sy <= w.top + w.height:
+                        return w.title
+        except Exception:
+            pass
+        return None
+
     def click_at(self, x, y, button="left", clicks=1, relative=True, desc=None):
         """Click at a coordinate. relative=True treats (x,y) as offsets inside
         the target window, which is what you almost always want - absolute
@@ -214,6 +263,14 @@ class Clicker:
         try:
             ox, oy = self.origin()
             sx, sy = (ox + x, oy + y) if relative else (x, y)
+            blocker = self._own_ui_at(sx, sy)
+            if blocker and blocker.lower() not in self.window_title.lower():
+                raise WindowNotReady(
+                    f"Refusing to click ({sx},{sy}) - it falls inside this "
+                    f"project's own always-on-top window ({blocker!r}), which "
+                    f"would intercept the click instead of the intended target "
+                    f"'{self.window_title}'. Move or close that window, or pick "
+                    f"a different coordinate.")
             before = self._shot("before")
             ca.log_click(sx, sy, button)
             pyautogui.moveTo(sx, sy)
