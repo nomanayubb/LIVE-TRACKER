@@ -268,15 +268,32 @@ class Clicker:
         finally:
             self._done()
 
-    def _send_wheel(self, clicks):
-        """Send wheel input via SendInput.
+    # Virtual-key codes for held modifiers during a wheel event
+    _VK = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12}
+
+    def _send_wheel(self, clicks, horizontal=False, modifiers=None):
+        """Send wheel input via SendInput, optionally horizontal and/or with
+        modifier keys held throughout - this is how trackpad/touch gestures
+        actually reach most apps, since Windows has no simple "inject a pinch"
+        primitive. Apps that respond to two-finger gestures respond to these
+        same underlying messages, because that's what the OS/trackpad driver
+        sends them too:
+            pinch-zoom            -> Ctrl + vertical wheel
+            two-finger up/down    -> plain vertical wheel (see scroll())
+            two-finger left/right -> horizontal wheel (MOUSEEVENTF_HWHEEL)
+            shift+scroll pan      -> Shift + vertical wheel (some apps pan
+                                      horizontally with this instead of a
+                                      true horizontal wheel - both are provided)
 
         pyautogui.scroll() was verified to do NOTHING on Windows 11 Notepad -
         measured a pixel delta of 0.00 across repeated attempts while a
         PageDown keypress moved the view by 7.86. Its wheel events don't reach
         modern WinUI apps. SendInput with MOUSEEVENTF_WHEEL does."""
         MOUSEEVENTF_WHEEL = 0x0800
+        MOUSEEVENTF_HWHEEL = 0x1000
+        KEYEVENTF_KEYUP = 0x0002
         WHEEL_DELTA = 120
+        flag = MOUSEEVENTF_HWHEEL if horizontal else MOUSEEVENTF_WHEEL
 
         class MOUSEINPUT(ctypes.Structure):
             _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
@@ -290,19 +307,31 @@ class Clicker:
         class INPUT(ctypes.Structure):
             _fields_ = [("type", ctypes.c_ulong), ("union", _INPUTunion)]
 
-        sent = 0
-        for _ in range(abs(int(clicks))):
-            mi = MOUSEINPUT(0, 0, ctypes.c_ulong(WHEEL_DELTA if clicks > 0 else -WHEEL_DELTA & 0xFFFFFFFF),
-                            MOUSEEVENTF_WHEEL, 0, None)
-            inp = INPUT(0, _INPUTunion(mi=mi))
-            sent += ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-            time.sleep(0.02)
-        return sent
+        mods = [self._VK[m] for m in (modifiers or []) if m in self._VK]
+        for vk in mods:
+            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+        time.sleep(0.03)
+        try:
+            sent = 0
+            for _ in range(abs(int(clicks))):
+                mi = MOUSEINPUT(0, 0, ctypes.c_ulong(WHEEL_DELTA if clicks > 0 else -WHEEL_DELTA & 0xFFFFFFFF),
+                                flag, 0, None)
+                inp = INPUT(0, _INPUTunion(mi=mi))
+                sent += ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+                time.sleep(0.02)
+            return sent
+        finally:
+            for vk in reversed(mods):
+                ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
 
-    def scroll(self, amount, x=None, y=None, relative=True, fallback_keys=True):
+    def scroll(self, amount, x=None, y=None, relative=True, fallback_keys=True, modifiers=None):
         """Scroll wheel. Positive = up/away, negative = down/toward. If x/y are
         given the pointer moves there first, which matters in apps where scroll
         applies to whatever is under the cursor.
+
+        modifiers holds keys during the wheel event, e.g. scroll(-3,
+        modifiers=['ctrl']) for pinch-zoom-equivalent (or just use zoom()),
+        or ['shift'] for apps that pan horizontally with Shift+wheel.
 
         Falls back to PageUp/PageDown if wheel input produces no visible change -
         some apps ignore synthetic wheel events entirely but honour keys."""
@@ -315,7 +344,7 @@ class Clicker:
                 time.sleep(0.1)
 
             before = self._region_fingerprint()
-            self._send_wheel(amount)
+            self._send_wheel(amount, modifiers=modifiers)
             time.sleep(0.35)
             method = "wheel"
 
@@ -332,6 +361,92 @@ class Clicker:
                     "content_moved": moved, "after": self._shot("scroll")}
         finally:
             self._done()
+
+    def zoom(self, amount, x=None, y=None, relative=True, modifiers=None):
+        """Pinch-zoom equivalent: Ctrl + vertical wheel, which is how a
+        trackpad's pinch gesture actually reaches almost every app that
+        supports it (browsers, editors, image/map viewers, PDF readers).
+        amount > 0 = zoom in (spread fingers), amount < 0 = zoom out (pinch
+        together). Extra modifiers (e.g. ['shift']) are held alongside Ctrl
+        for apps that use a 3-key zoom combo."""
+        win = self._guard(f"zoom {amount}")
+        try:
+            if x is not None and y is not None:
+                ox, oy = self.origin()
+                sx, sy = (ox + x, oy + y) if relative else (x, y)
+                pyautogui.moveTo(sx, sy)
+                time.sleep(0.1)
+            before = self._region_fingerprint()
+            self._send_wheel(amount, modifiers=["ctrl"] + list(modifiers or []))
+            time.sleep(0.3)
+            moved = not self._region_unchanged(before)
+            return {"ok": True, "amount": amount, "content_moved": moved,
+                    "after": self._shot("zoom")}
+        finally:
+            self._done()
+
+    def swipe(self, direction, amount=5, x=None, y=None, relative=True,
+             modifiers=None, fallback_shift=True):
+        """Two-finger trackpad swipe equivalent.
+
+        direction: 'up' | 'down' | 'left' | 'right'
+            up/down    -> plain vertical wheel (same as scroll())
+            left/right -> horizontal wheel (MOUSEEVENTF_HWHEEL) first, then
+                          Shift+vertical-wheel if that produced no change.
+
+        Tested against real apps, not assumed: raw MOUSEEVENTF_HWHEEL did
+        nothing in Windows File Explorer (delta 0.48, no visible change),
+        while Shift+wheel genuinely scrolled it (delta 2.27). Shift+wheel is
+        the older, far more universally supported horizontal-scroll
+        convention on Windows - most apps built on standard list/tree
+        controls only handle it if they explicitly opt into the newer
+        horizontal-wheel message, which many don't. So this tries the
+        "correct" gesture first and automatically falls back to the
+        convention that actually works almost everywhere.
+        """
+        if direction not in ("up", "down", "left", "right"):
+            raise ValueError("direction must be one of: up, down, left, right")
+        win = self._guard(f"swipe {direction}")
+        try:
+            if x is not None and y is not None:
+                ox, oy = self.origin()
+                sx, sy = (ox + x, oy + y) if relative else (x, y)
+                pyautogui.moveTo(sx, sy)
+                time.sleep(0.1)
+            before = self._region_fingerprint()
+            horizontal = direction in ("left", "right")
+            sign = 1 if direction in ("up", "right") else -1
+            self._send_wheel(sign * amount, horizontal=horizontal, modifiers=modifiers)
+            time.sleep(0.3)
+            method = "hwheel" if horizontal else "wheel"
+
+            if horizontal and fallback_shift and self._region_unchanged(before):
+                self._send_wheel(sign * amount, horizontal=False,
+                                 modifiers=["shift"] + list(modifiers or []))
+                time.sleep(0.3)
+                method = "shift+wheel"
+
+            moved = not self._region_unchanged(before)
+            return {"ok": True, "direction": direction, "method": method,
+                    "content_moved": moved, "after": self._shot("swipe")}
+        finally:
+            self._done()
+
+    def rotate(self, *_args, **_kwargs):
+        """Two-finger rotate has no reliable equivalent here.
+
+        Unlike pinch-zoom (Ctrl+wheel) and two-finger swipe (horizontal wheel),
+        rotation isn't a convention most apps map to any wheel+modifier
+        combination - the few that support it (some image/CAD viewers) expect
+        raw WM_GESTURE/touch-injection input, which needs Windows' Touch
+        Injection API (InitializeTouchInjection/InjectTouchInput), a much
+        larger addition than a wheel event. Not implemented - raising rather
+        than silently pretending a keypress accomplishes this."""
+        raise NotImplementedError(
+            "No reliable rotate-gesture equivalent via wheel/keyboard input. "
+            "If a specific app needs this, check whether it has a dedicated "
+            "rotate hotkey (many CAD/viewer apps do) and use hotkey() instead."
+        )
 
     def _region_fingerprint(self):
         try:
