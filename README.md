@@ -30,6 +30,34 @@ If a script mentioned here no longer matches reality, fix the mismatch immediate
 
 ---
 
+## Quickstart — run the whole stack
+
+```bash
+cd "C:\Users\noman\Desktop\live-tracker"
+source venv/Scripts/activate
+nohup python dual_tracker.py "SomeWindowTitle" > tracker.log 2>&1 &   # the eye
+nohup python overlay.py > overlay.log 2>&1 &                          # live HUD
+nohup python admin_panel.py > admin.log 2>&1 &                        # control surface
+```
+Give it ~20-30s on first launch (EasyOCR loads its model then). Check `.live_screen_state.json` or the admin panel to confirm it's alive.
+
+## Verification status — every mode actually tested, not just documented
+
+All 6 modes were driven end-to-end against `dual_tracker.py`'s real output (not just read from source) in a dedicated test pass. Results:
+
+| Mode | Switches correct | Fields correct | Speed (re-measured) |
+|---|---|---|---|
+| `normal` | ✅ | ✅ | ~15-20ms (not the earlier-claimed 3-9ms — that number came from an idle-thread benchmark, not realistic operation) |
+| `ui_automation` | ✅ (vision data present) | ✅ | ~15-16ms |
+| `text_reading` | ✅ (48x27 grid, exact_frame_png present) | ✅ | ~14-15ms |
+| `evidence` | ✅ (same code path as text_reading) | ✅ | ~14-15ms |
+| `motion_capture` | ✅ | N/A (separate module, not the tracker) | 30-60fps depending on region (varies with system load) |
+| `privacy` | ✅ (`STATUS: PAUSED BY USER`, no data at all) | ✅ | no capture |
+
+Every functional claim (which switches flip, which fields appear/disappear, grid dimensions, exact-frame behavior) held up exactly as documented. Only the absolute speed numbers were optimistic and have been corrected throughout this file.
+
+Two real bugs were found and fixed during this pass, both worth knowing about: a stale `.tracker_window_config.txt` can silently override a fresh command-line target (§8b), and `admin_panel.py`/`overlay.py` were missing `SetProcessDPIAware()` (now fixed, same fix `dual_tracker.py`/`clicker.py` already had).
+
 ## Current architecture (use these — see "Deprecated files" below for what NOT to use)
 
 ### 1. `dual_tracker.py` — the tracker to run (supersedes `live_tracker.py`, `universal_tracker.py`, `full_tracker.py`)
@@ -255,9 +283,9 @@ Things that turned out **not** to matter (measured, so don't re-optimize them): 
 - **A Toplevel dialog can be a real, correctly-registered window and still be invisible in a screenshot** if something else is on top of it - even briefly. A 4-second `-topmost` timer was too short for a reference dialog meant to stay open while switching back to the app it explains; extended to stay topmost for its full lifetime.
 - **Reading `.live_screen_state.json` while the tracker is mid-write races.** The file isn't written atomically, so an occasional `JSONDecodeError` on an empty read is expected under polling - retry rather than treating it as a real error.
 
-### 9. Verified click-automation pattern (see `click_cat.py` for the reference implementation)
+### 9. Verified click-automation pattern (now encoded in `clicker.py` — §10 — not a standalone script)
 
-**The one rule that matters:** always re-verify focus (via brightness check or `ACTUAL_FOREGROUND`) **immediately before every single click/keystroke, inside the same script run.** Never split "activate window" and "click" across two separate script invocations — focus reverts to whatever invoked the script (the terminal) the instant a script exits, so a second script starting later can't assume the target is still focused. This was the root cause of nearly every failed automation attempt this session.
+**The one rule that matters:** always re-verify focus (via `ACTUAL_FOREGROUND` or `clicker.py`'s own guard) **immediately before every single click/keystroke, inside the same script run.** Never split "activate window" and "click" across two separate script invocations — focus reverts to whatever invoked the script (the terminal) the instant a script exits, so a second script starting later can't assume the target is still focused. This was the root cause of nearly every failed automation attempt this project has hit, including during the Blender rigging session.
 
 **Window-activation trick that actually works on this machine:** `window.minimize(); window.restore()`. Plain `.activate()` (`SetForegroundWindow`) fails **silently** — no exception, just doesn't work — because of Windows' focus-steal prevention when the caller process isn't already foreground.
 
@@ -267,13 +295,55 @@ Things that turned out **not** to matter (measured, so don't re-optimize them): 
 
 ---
 
-## Roadmap / requested features (not yet built — build these next, and move them to "Current architecture" above once done)
+### 10. `clicker.py` — the "hands" to vision.py's "eyes" (verified interaction layer)
 
-1. **Claude-activity status** — a shared status file (e.g. `~/.claude_activity.json`) that any automation script writes to when it starts/stops an action: which window, which specific action, timestamp, whether it's a private/background window or one visible in the user's taskbar. The overlay should display "Claude: idle" vs "Claude: clicking in Blender > Add menu" live.
-2. **Click-origin attribution** — since the OS can't natively distinguish a synthetic (pyautogui) click from a real hardware click, approximate it: every automation script logs each click it performs (`~/.claude_click_log.txt`, timestamped x/y). The overlay/tracker compares a detected click against this log — if a real click coincides with a very recent logged entry, attribute it to Claude; otherwise attribute it to the user.
-3. **Multi-window / multi-tab tracking without interference** — extend `dual_tracker.py` to watch several target windows at once (a list instead of a single `current_target`), reporting each one's state independently, so automation can work in one window while genuinely not disturbing others.
-4. **Admin control panel** — a small settings UI (likely `overlay.py` extended, or a separate `admin_panel.py`) letting the user toggle individual features on/off at runtime (OCR on/off, screenshot buffer on/off, which signals to compute, which window(s) to track) without editing code.
-5. **Richer per-frame pixel reporting** — expand beyond the 16×9 grid on request (configurable resolution), and/or full-resolution raw frame export on demand for a specific instant.
+Every action re-verifies the target window is genuinely foreground **immediately before acting, inside the same process** — never split across two script runs, since focus reverts to whatever launched a script the instant it exits. If it can't confirm the right window, it refuses to act rather than clicking blind.
+
+```python
+c = clicker.Clicker("Blender")
+c.click_at(500, 400)               # window-relative click, verified
+c.click_text("File")               # OCR-find then click
+c.click_image("save_icon.png")     # template-match then click
+c.drag(100, 100, 400, 400)         # stepped movement, not one long jump
+c.scroll(-5)                       # SendInput wheel, with key fallback
+c.type_text("hello")               # CapsLock-safe (see gotchas below)
+c.wait_for_text("Done", timeout=30)
+c.run_steps([...])                 # multiple dependent actions, ONE process
+```
+
+`run_steps()` is how a multi-action sequence (e.g. open a menu, click an item in it) should always be driven — splitting it across separate script invocations is what caused nearly every automation failure this project has hit.
+
+### 11. `replay.py` — turn recorded history into images/video, for a human, fast
+
+Claude never needs this — it reads OCR/vision data directly. This exists so a *person* can see what happened without staring at raw JSON. Measured: 90 images/sec from logged frame data, contact sheet of 50 frames in 0.08s, data→video conversion at 237 frames/sec (no capture involved, just encoding stored grids).
+
+```bash
+python replay.py record 60      # log 60s of frame data
+python replay.py build 50       # rebuild last 50 as individual images
+python replay.py sheet 50       # one contact-sheet image of many moments
+python replay.py video 200      # convert logged data straight to an mp4
+python replay.py timeline       # text log of window switches + text changes
+```
+
+### 12. `compare_modes.py` — visual proof of what each mode actually captures
+
+Applies every mode in turn, lets it settle, and renders one sheet showing what the report contains in each — so the precision/grid-size tradeoff is visible rather than described. Run `python compare_modes.py`.
+
+---
+
+## Roadmap — everything originally listed here is now BUILT
+
+This section used to list five requested features as "not yet built." All five are done; do not treat them as missing:
+
+| Was requested | Now lives in | Confirm it |
+|---|---|---|
+| Claude-activity status | `claude_activity.py` — `set_activity()`/`get_activity()` | `claude_active`, `claude_action`, `claude_window` fields |
+| Click-origin attribution | `dual_tracker.py`'s click detection + `claude_activity.log_click()` | `last_click.by` is `"claude"` or `"user"` |
+| Multi-window tracking | comma-separated `.tracker_window_config.txt` | `watched_windows` field, ~5ms per extra window |
+| Admin control panel | `admin_panel.py` | STOP kill switch, per-mode buttons, Settings/Reference dialog |
+| Richer per-frame pixel reporting | precision mode (48×27 grid + exact JPEG) | `python modes.py apply text_reading`, check `exact_frame_png` |
+
+Nothing is currently on the roadmap as "not yet built." If a genuinely new feature is requested, add it here as its own line and remove it once done — don't leave it in prose that looks like this table.
 
 ---
 
@@ -293,8 +363,9 @@ Things that turned out **not** to matter (measured, so don't re-optimize them): 
 - `live_tracker.py` — first working version, single-threaded, OCR blocks the whole loop. Superseded by `dual_tracker.py`.
 - `universal_tracker.py` — added window-switching and `ACTUAL_FOREGROUND`, still single-threaded/OCR-blocking. Superseded by `dual_tracker.py`.
 - `full_tracker.py` — added the 20 extra signals but still single-threaded (had a serious perf bug: recreated a Tk() window every frame just for clipboard access, ~9.4s/frame). Superseded by `dual_tracker.py`, which fixed the clipboard bug AND split into fast/slow threads.
-- `blender_automation_final.py`, `automate_rigging.py`, `focus_and_automate.py`, `run_rigging.py`, `multi_handler_system*.py`, `import_cat.py`, `import_model.py`, `mcp_server.py` — early blind-automation attempts (no verification loop), all unreliable, superseded by the verify-before-every-click pattern in `click_cat.py`/`select_by_name.py`/`do_rigging.py`.
+- `blender_automation_final.py`, `automate_rigging.py`, `focus_and_automate.py`, `run_rigging.py`, `multi_handler_system*.py`, `import_cat.py`, `import_model.py`, `click_cat.py`, `select_by_name.py`, `do_rigging.py`, `mcp_server.py` — early blind-automation attempts (no verification loop), all unreliable, superseded by `clicker.py` (§10), which encodes the same verify-before-every-click lesson as reusable, general-purpose code instead of one-off Blender-specific scripts.
 - `*.log` files scattered in this folder — just run output, safe to delete anytime, not part of the system itself.
+- The dozens of Blender rigging diagnostic scripts (`rig_*.py`, `check_*.py`, `recover*.py`, `audit*.py`, `scene_audit.py`, `blender_diagnose.py`, `_rig_setup.py`) — one-off scripts written during the root-cause investigation (§"The actual Blender task"), not part of the tracker system. They're useful history of what was tried, but not something a fresh session needs to run again.
 
 ## Git
 
@@ -315,8 +386,30 @@ git push
 
 Original bug report: mesh doesn't move in pose mode after applying automated weights.
 
-Progress so far:
-- Cat model (glTF import, object name `Mesh_0`) confirmed loaded in Blender 3.5.1, alongside default Cube/Camera/Light — confirmed visually via screenshot.
-- Cat mesh selected successfully via verified click automation.
-- Armature-add step (`Add` menu → `Armature`) attempted multiple times, **not yet confirmed successful** — focus kept reverting to Claude Code mid-sequence before earlier fixes were in place. Retry this using `dual_tracker.py`'s `ACTUAL_FOREGROUND` field to gate every click.
+**Root cause found and confirmed, in Blender's own words:**
+```
+Warning: Bone Heat Weighting: failed to find solution for one or more bones
+{'FINISHED'}
+```
+The automatic-weight solver fails on this mesh and assigns **zero weights to zero vertices**, but the operator still reports `FINISHED` — so the UI shows a completely normal-looking rig (parent set ✓, Armature modifier ✓, vertex group created ✓) that is silently non-functional. That's why nothing moved in pose mode and why it was so hard to diagnose by eye: every panel that would normally flag a broken rig looked fine.
+
+**What was tried and measured, in order:**
+| Attempt | Result |
+|---|---|
+| Decimate 432k → 37k verts, then automatic weights | Still 0 weighted verts |
+| Reposition bone to run inside the mesh (was outside it) | Still 0 weighted verts |
+| Clean mesh topology (removed ~8,700 duplicate/loose verts) | Still 0 weighted verts |
+| Envelope weights (default bone radius) | Still 0 weighted verts |
+| Envelope weights (widened bone radius) | Still 0 weighted verts |
+| **Direct vertex-group assignment (weight 1.0, bypassing both solvers)** | **28,581/28,581 weighted — mesh genuinely deforms in pose mode, verified: moving the bone moved a mesh vertex by 0.2 units** |
+
+Direct assignment is confirmed working but crude — the whole mesh follows one bone rigidly (correct for proving the pipeline, not a finished rig). A multi-bone skeleton (Hips/Spine/Head/Arm_L/Arm_R/Leg_L/Leg_R/Tail) with custom proximity-based per-vertex weighting was built (`rig_multibone.py`) since Blender's own solvers can't be trusted on this mesh, but the session hit a serious automation mishap partway through (see below) and this was not confirmed working before the session ended.
+
+**Safety net in place:** the original 432k-vertex mesh was duplicated to `Mesh_0_ORIGINAL_BACKUP` and hidden before any destructive editing — recoverable regardless of what happened to the working copy.
+
+**⚠️ Automation mishap, learn from this before touching Blender again:** typing Python into Blender's interactive console via synthetic keystrokes is fragile — if the OS cursor moves or focus shifts mid-typing (including from the *user's own mouse movement*), the remaining characters land in the 3D viewport as hotkey shortcuts instead of console input. This happened mid-session: stray keystrokes triggered repeated object duplication (object count jumped to 61) and activated Blender's fullscreen Animation Player (a black-screen modal state that `Escape` alone did not clear — clicking its small close icon in the status bar did). **Never** run a multi-line block by typing it character-by-character into the console; write it to a `.py` file and have the console `exec(open(path).read())` as a single line instead — this was the eventual fix and worked reliably.
+
+**⚠️ The .blend file was never saved to disk this session.** Everything above exists only in Blender's live memory/undo buffer. Before any further Blender work: `File → Save As` to a real path immediately, so a crash or accidental close doesn't lose the backup mesh or the rigging progress.
+
+**Next step if resuming:** re-verify current scene state via the console (`bpy.data.objects`, vertex group weights) before assuming anything above is still true — Ctrl+Z was used to recover from the duplication incident, and its exact end-state was not re-confirmed via automation after that.
 - Not yet done: parent mesh to armature with automatic weights, enter Pose Mode, test that the mesh actually deforms when a bone is moved (this is the actual fix/diagnosis for the original bug).
