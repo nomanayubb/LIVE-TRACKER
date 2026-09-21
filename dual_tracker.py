@@ -461,11 +461,22 @@ def fast_worker(target_window_name):
                 precision = precision_on()
                 g_cols, g_rows = PRECISION_GRID if precision else NORMAL_GRID
                 stats["total_iterations"] = iteration
+                # WINDOW_CONFIG may name several windows, comma separated. The FIRST
+                # is the primary target and gets the full treatment (pixel capture,
+                # OCR, vision scan). The rest are watched cheaply - existence, state,
+                # geometry, whether they're foreground - all sub-millisecond calls.
+                # Doing full capture on every window would multiply the cost linearly;
+                # this keeps multi-window watching essentially free.
+                watch_list = []
                 try:
                     if WINDOW_CONFIG.exists():
-                        new_target = WINDOW_CONFIG.read_text(encoding='utf-8').strip()
-                        if new_target and new_target != current_target:
-                            current_target = new_target
+                        raw_cfg = WINDOW_CONFIG.read_text(encoding='utf-8').strip()
+                        if raw_cfg:
+                            parts = [p.strip() for p in raw_cfg.split(",") if p.strip()]
+                            if parts:
+                                if parts[0] != current_target:
+                                    current_target = parts[0]
+                                watch_list = parts[1:]
                 except Exception:
                     pass
 
@@ -509,6 +520,25 @@ def fast_worker(target_window_name):
                     except Exception:
                         pass
                 prev_fg_title = fg_title
+
+                # Cheap per-window status for every secondary watched window.
+                watched = []
+                for wname in watch_list:
+                    match = next((w for w in all_windows if wname.lower() in w.title.lower()), None)
+                    if match is None:
+                        watched.append({"name": wname, "alive": False})
+                        continue
+                    try:
+                        st = ("minimized" if match.isMinimized else
+                              "maximized" if match.isMaximized else "normal")
+                        watched.append({
+                            "name": wname, "alive": True, "title": match.title[:50],
+                            "state": st, "foreground": match.title == fg_title,
+                            "x": match.left, "y": match.top,
+                            "w": match.width, "h": match.height,
+                        })
+                    except Exception:
+                        watched.append({"name": wname, "alive": True, "state": "unknown"})
 
                 target_window = None
                 target_alive = False
@@ -712,6 +742,7 @@ def fast_worker(target_window_name):
                     "claude_action": claude_activity["action"], "claude_private": claude_activity["private"],
                     "last_click": last_click_info,
                     "exact_frame_png": str(FRAME_FILE) if precision else None,
+                    "watched_windows": watched,
                     "vision": vision_result,
                     "vision_age_ms": round((now - vision_ts) * 1000, 0) if vision_ts else -1,
                     "status": "Running"
@@ -758,6 +789,7 @@ VISION_LAYOUT: {vision_result.get('layout', {})}
 VISION_EDGE_DENSITY: {vision_result.get('edges', {}).get('total_edge_density_pct', '-')}%
 VISION_CHANGED_CELLS: {len(vision_result.get('region_change', {}).get('changed_cells', []))}
 VISION_PHASH: {vision_result.get('phash', '-')[:32]}
+WATCHED_WINDOWS: {len(watched)} secondary {'| ' + ' | '.join(f"{w['name']}:{'alive/' + w.get('state','?') if w.get('alive') else 'CLOSED'}" for w in watched) if watched else ''}
 PRECISION_MODE: {'ON' if precision else 'off (default - create .tracker_precision to enable)'}
 EXACT_FRAME: {FRAME_FILE if precision else '- (precision mode off)'}
 TEXT_DATA: {ocr_text}
