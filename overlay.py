@@ -34,6 +34,16 @@ label = tk.Label(
 )
 label.pack(fill="both", expand=True)
 
+# A real, visible close button - double-click/Escape exist too, but a user
+# asked specifically "does it have a cross button" and it didn't; those two
+# alternatives aren't a substitute for an actual clickable X.
+close_btn = tk.Label(root, text="✕", bg="#111111", fg="#ff5555",
+                     font=("Consolas", 12, "bold"), cursor="hand2")
+close_btn.place(relx=1.0, x=-6, y=4, anchor="ne")
+close_btn.bind("<Button-1>", lambda e: root.destroy())
+close_btn.bind("<Enter>", lambda e: close_btn.config(fg="#ffffff"))
+close_btn.bind("<Leave>", lambda e: close_btn.config(fg="#ff5555"))
+
 # Let the user drag the overlay by clicking anywhere on it
 def start_move(event):
     root._drag_x = event.x
