@@ -161,7 +161,7 @@ def open_settings():
     win.lift()
     win.focus_force()
     win.attributes("-topmost", True)
-    win.after(200, lambda: win.attributes("-topmost", False))
+    win.after(4000, lambda: win.attributes("-topmost", False))
 
     nb = ttk.Style()
     nb.theme_use("default")
