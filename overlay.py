@@ -111,15 +111,34 @@ def refresh():
 
         # Recent clicks across multiple windows, newest first - so attribution
         # is visible per-window, not just the single latest click.
+        #
+        # Two DIFFERENT record schemas share this file: a normal click has
+        # "app_title"; a taskbar/desktop-icon launch (added later) has no
+        # such key, only "switched_to_app". A single try/except wrapping the
+        # whole loop meant one malformed-looking record (really just a
+        # different, valid schema) threw a KeyError and silently discarded
+        # the ENTIRE list - reproduced directly: whenever the newest line was
+        # a launch record, the overlay showed "(none yet)" even though
+        # plenty of real click history existed. Each line now gets its own
+        # try/except, and each schema is rendered on its own terms instead
+        # of assuming every line looks the same.
         recent_lines = []
         try:
             lines = CLICK_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines()
-            for line in reversed(lines[-15:]):
-                e = json.loads(line)
-                who = "you" if e["by"] == "user" else "CLAUDE"
-                recent_lines.append(f"  {e.get('clock','')} {who:6s} -> {e['app_title'][:22]}")
         except Exception:
-            pass
+            lines = []
+        for line in reversed(lines[-15:]):
+            try:
+                e = json.loads(line)
+                who = "you" if e.get("by") == "user" else "CLAUDE"
+                if e.get("type") == "taskbar_or_desktop_launch":
+                    recent_lines.append(f"  {e.get('clock','')} {who:6s} -> "
+                                        f"launched {e.get('switched_to_app','?')[:20]}")
+                else:
+                    recent_lines.append(f"  {e.get('clock','')} {who:6s} -> "
+                                        f"{e.get('app_title','?')[:22]}")
+            except Exception:
+                continue
         recent_block = "\n".join(recent_lines) if recent_lines else "  (none yet)"
 
         display = (
