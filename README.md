@@ -60,8 +60,39 @@ Replace `"Blender"` with any window title substring to track a different app. Om
 - `~/tracker_snapshots/` — rotating buffer of the last 20 real PNG screenshots (one saved every ~3s)
 
 **Live control files** (create/write these while the tracker is running):
-- `~/.tracker_window_config.txt` — write a window-title substring to switch what the tracker targets, live, without restarting
+- `~/.tracker_window_config.txt` — write a window-title substring to switch what the tracker targets, live, without restarting. Comma-separate several to also cheaply watch extras (see multi-window below).
 - `~/.tracker_refresh` — create this empty file to force one immediate re-activation/re-verify of the target window (auto-deleted after use)
+
+**Complete `.live_screen_state.json` field reference** (every key the tracker actually writes — checked directly against the source, not guessed):
+
+| Field | Meaning |
+|---|---|
+| `timestamp`, `frame_ts` | Unix time of this report / of the last pixel capture |
+| `iteration`, `total_iterations` | Fast-loop tick counter |
+| `loop_ms`, `avg_loop_ms` | This tick's duration / rolling average — the headline speed number |
+| `status` | `"Running"` or `"PAUSED"` |
+| `mouse_x`, `mouse_y` | Live cursor position |
+| `idle_seconds` | Seconds since last input |
+| `screen_resolution`, `monitor`, `monitor_count` | Display geometry |
+| `actual_foreground`, `foreground_process`, `foreground_pid`, `foreground_changed` | The genuinely focused window right now, regardless of tracker target |
+| `target_window`, `target_window_obj`, `target_alive`, `target_state` | What the tracker is pointed at, and its window state (`normal`/`minimized`/`maximized`) |
+| `watched_windows` | List of secondary windows from a comma-separated config, each `{name, alive, title, state, foreground, x, y, w, h}` |
+| `window_list`, `available_windows`, `new_windows` | All visible window titles / newly appeared ones |
+| `clipboard` | Current clipboard text (first 200 chars) |
+| `brightness`, `dominant_color` | Pixel-grid summary stats |
+| `pixel_grid`, `grid_cols`, `grid_rows` | The RGB colour grid (16×9 normal / 48×27 precision) — see "Precision mode" |
+| `precision_mode` | Whether the richer grid + exact frame are active |
+| `exact_frame_png` | Path to the sharp JPEG, only present when `precision_mode` is true |
+| `frame_change_pct`, `frame_change_bbox` | How much of the screen changed since last tick, and where (`[x,y,w,h]`) |
+| `selection_blob_count`, `selection_blob_center` | Orange-outline (Blender-style selection) detector |
+| `text_data`, `ocr_text`, `ocr_boxes`, `ocr_ts`, `ocr_age_ms`, `ocr_pass_count`, `ocr_passes`, `new_text_tokens` | OCR output, freshness, and what text newly appeared |
+| `vision`, `vision_ts`, `vision_age_ms`, `vision_pass_count` | The full `vision.py` structural scan and its freshness (rectangles, text regions, layout, etc. — see `vision.py` section) |
+| `last_click`, `clicks_detected`, `claude_clicks`, `user_clicks`, `by`, `app_title`, `app_process`, `app_pid`, `app_layer`, `claude_delay_s` | Click attribution — who clicked, where, in which app, foreground or background |
+| `claude_active`, `claude_action`, `claude_window`, `claude_private` | What `claude_activity.py` says Claude is currently doing |
+| `denied_window_blocks`, `paused_ticks` | Admin-panel enforcement counters |
+| `started_at` | When this tracker process started |
+
+If a field you need isn't in this table, it doesn't exist yet — grep `dual_tracker.py` for the literal string before assuming it's just undocumented.
 
 ### 2. `overlay.py` — the live on-screen HUD
 
