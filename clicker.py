@@ -62,13 +62,34 @@ class Clicker:
         self.verify = verify          # False only for deliberate whole-desktop actions
         self.shots = shots            # save a before/after image per action
         self._ocr = None
+        self._hwnd = None             # latched once found - see _find_window
 
     # ---------------------------------------------------------------- window
 
     def _find_window(self):
+        """Resolve the target window, preferring a latched handle.
+
+        Apps rename their own windows mid-task - Notepad becomes
+        '*Untitled - Notepad' the moment you type, browsers retitle on
+        navigation, editors append the document name. Matching by title on
+        every action therefore breaks partway through a sequence. Once we've
+        found the window we latch its handle, which stays valid regardless of
+        what the app calls itself afterwards."""
+        if self._hwnd is not None:
+            for w in gw.getAllWindows():
+                if getattr(w, "_hWnd", None) == self._hwnd:
+                    return w
+            self._hwnd = None          # window closed - fall back to title search
+
         wins = [w for w in gw.getWindowsWithTitle(self.window_title) if w.title.strip()]
         if not wins:
+            # Retry loosely: the title may have gained a prefix/suffix such as '*'
+            needle = self.window_title.lower().lstrip("*").strip()
+            wins = [w for w in gw.getAllWindows()
+                    if w.title.strip() and needle in w.title.lower()]
+        if not wins:
             raise WindowNotReady(f"No window matching '{self.window_title}'")
+        self._hwnd = getattr(wins[0], "_hWnd", None)
         return wins[0]
 
     def focus(self, tries=4):
@@ -114,7 +135,18 @@ class Clicker:
             return ""
 
     def _is_foreground(self):
-        return self.window_title.lower() in (self._foreground_title() or "").lower()
+        """Compare window handles, not titles - the target may have renamed
+        itself since we latched onto it (see _find_window)."""
+        try:
+            fg = gw.getActiveWindow()
+            if fg is None:
+                return False
+            if self._hwnd is not None and getattr(fg, "_hWnd", None) == self._hwnd:
+                return True
+            needle = self.window_title.lower().lstrip("*").strip()
+            return needle in (fg.title or "").lower()
+        except Exception:
+            return False
 
     def _guard(self, action_desc):
         """The gate every action passes through: confirm the right window is
@@ -226,13 +258,46 @@ class Clicker:
 
     # ---------------------------------------------------------------- keyboard
 
-    def type_text(self, text, interval=0.02):
+    VK_CAPITAL = 0x14
+
+    def _capslock_on(self):
+        return bool(ctypes.windll.user32.GetKeyState(self.VK_CAPITAL) & 1)
+
+    def type_text(self, text, interval=0.02, fix_capslock=True):
+        """Type text into the focused window.
+
+        CapsLock matters here: pyautogui sends raw keystrokes, so with CapsLock
+        on every letter arrives inverted - typing 'Hello' produces 'hELLO' and
+        the caller never finds out. That silently corrupts anything typed, so
+        by default we turn CapsLock off first and restore it afterwards.
+
+        Separately, be aware the TARGET APP may rewrite what you type. Windows
+        Notepad has autocorrect on by default: typing 'MiXeD' lands as 'Mixed'
+        while nonsense like 'qWzX' is left alone (verified - our keystrokes are
+        accurate, the app edits them afterwards). If exact text matters, read it
+        back (clipboard or OCR) and compare rather than assuming it landed."""
         win = self._guard(f"type {text[:30]!r}")
+        toggled = False
         try:
+            if fix_capslock and self._capslock_on():
+                pyautogui.press("capslock")
+                # Poll until the OS actually reports the new state. A fixed short
+                # sleep was not enough - typing began before the toggle landed, so
+                # the first few characters still came out inverted ('MiXeD Case'
+                # arrived as 'Mixed case') while the rest was correct.
+                for _ in range(40):
+                    if not self._capslock_on():
+                        toggled = True
+                        break
+                    time.sleep(0.02)
+                time.sleep(0.05)   # small settle after the state flips
             pyautogui.typewrite(text, interval=interval)
             time.sleep(0.15)
-            return {"ok": True, "typed": text, "after": self._shot("typed")}
+            return {"ok": True, "typed": text, "capslock_corrected": toggled,
+                    "after": self._shot("typed")}
         finally:
+            if toggled:                      # leave the keyboard as we found it
+                pyautogui.press("capslock")
             self._done()
 
     def press(self, *keys, presses=1):

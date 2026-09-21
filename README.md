@@ -208,6 +208,13 @@ Things that turned out to matter, in order:
 
 Things that turned out **not** to matter (measured, so don't re-optimize them): JSON serialization, file writes, window enumeration, clipboard reads, and the GUI processes' refresh rates — all sub-millisecond.
 
+### 8b. Gotchas found while testing `clicker.py` (all verified, don't re-discover these)
+
+- **Windows rename themselves mid-task.** Notepad becomes `*Untitled - Notepad` the moment you type, then retitles again to `*<first line of your text> - Notepad`. Matching by title on every action breaks a sequence partway through. `clicker.py` latches the window **handle** on first lookup and reuses it, so renames don't matter.
+- **CapsLock silently inverts everything typed.** `pyautogui` sends raw keystrokes, so with CapsLock on `Hello` arrives as `hELLO` and nothing reports an error. `type_text()` now turns CapsLock off first (polling until the OS confirms the flip - a fixed short sleep was too slow and the first characters still came out wrong) and restores it afterwards.
+- **The target app may rewrite what you typed.** Notepad's autocorrect turns `MiXeD` into `Mixed`, while nonsense like `qWzX vBnM kJhG` types perfectly. Verified: the keystrokes are accurate, the app edits them after the fact. If exact text matters, read it back via clipboard or OCR and compare - don't assume.
+- **A focus guard can destroy the thing it's guarding.** The original `focus()` called `minimize(); restore()` every time, which dismissed any open menu - so step 2 of a menu sequence failed after step 1 opened it. It now does nothing at all when the window is already foreground.
+
 ### 9. Verified click-automation pattern (see `click_cat.py` for the reference implementation)
 
 **The one rule that matters:** always re-verify focus (via brightness check or `ACTUAL_FOREGROUND`) **immediately before every single click/keystroke, inside the same script run.** Never split "activate window" and "click" across two separate script invocations — focus reverts to whatever invoked the script (the terminal) the instant a script exits, so a second script starting later can't assume the target is still focused. This was the root cause of nearly every failed automation attempt this session.
