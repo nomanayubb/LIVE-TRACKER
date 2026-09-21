@@ -119,6 +119,22 @@ Normal tracking stays fast. When you need maximum capture detail, toggle **PRECI
 
 **On "data that can rebuild the exact screenshot":** a 1920×1080 frame is ~6.2 MB of raw pixels. Encoding all of them into JSON would be *larger and slower* than just writing an image file, so precision mode writes the real image to disk and links it from the report — you get exact original pixels without a separate screenshot step, and without a 6 MB JSON per frame. (An early attempt that PNG-encoded every frame took the loop from 90ms to 188ms; JPEG at q92, written only when the frame actually changes, made it essentially free.)
 
+### 7b. Which mode to use for which task
+
+| Task | PRECISION | Notes |
+|---|---|---|
+| Watching which app/window is in focus, tracking clicks, idle time | **OFF** | None of this touches pixels — precision adds nothing, costs speed |
+| Waiting for something to appear/finish (a dialog, a load, a render) | **OFF** | Change-detection + `region_change` grid already catch it |
+| Driving automation: finding a button, clicking a menu, verifying a step landed | **OFF** | `vision.py`'s rectangles/text-regions already give click targets; the OCR text confirms the step |
+| Reading dense small text (long logs, code, fine UI labels) | **ON** | More detail helps when characters are small |
+| Needing the exact original pixels of a moment (before/after comparison, evidence, replay) | **ON** | Writes `.live_frame.jpg` on every change, linked from the JSON |
+| Diagnosing a subtle visual difference (colour shifts, faint highlights, antialiasing) | **ON** | 1296-cell colour grid resolves what 144 cells cannot |
+| Long unattended runs / leaving it on in the background all day | **OFF** | Keeps CPU and disk writes minimal |
+
+Rule of thumb: **leave it OFF.** Turn it ON for the specific minutes you need maximum fidelity, then turn it back off. It toggles live — no restart needed.
+
+Separately, **STOP** (the red button) is for privacy, not performance: it halts *all* capture instantly. Use it whenever you're doing something you don't want captured at all — banking, passwords, private messages.
+
 ### 8. Performance notes (all measured, not assumed)
 
 | Configuration | Fast loop |
