@@ -35,3 +35,6 @@ legacy_state/
 .claude_click_log.txt
 .bench_tmp.*
 tracker_snapshots/
+.tracker_precision
+.tracker_change_history.jsonl
+.live_frame.*

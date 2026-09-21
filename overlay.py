@@ -79,7 +79,9 @@ def refresh():
         label.config(text=display)
     except Exception as e:
         label.config(text=f"Waiting for tracker...\n{e}")
-    root.after(100, refresh)  # re-check every 100ms
+    # 100ms is fine - measured at ~0.2 CPU-seconds/minute. The tracker's torch
+    # thread pool was the real CPU contention, not this overlay.
+    root.after(100, refresh)
 
 refresh()
 root.mainloop()

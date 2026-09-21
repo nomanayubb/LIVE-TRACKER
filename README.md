@@ -96,7 +96,46 @@ A GUI dashboard (run `python admin_panel.py`) showing live: whether Claude is cu
 
 Per-window blocking writes to `.tracker_denied_windows.txt`; a denied window is skipped entirely rather than falling back to a full-screen grab (which would leak its contents anyway).
 
-### 6. Verified click-automation pattern (see `click_cat.py` for the reference implementation)
+### 6. Change history — a replayable record, not just a snapshot
+
+`.tracker_change_history.jsonl` is an append-only log. Every time on-screen text changes, one JSON line records the timestamp, window label, and exactly which text **appeared** and **disappeared**:
+```json
+{"t": 1789953875.29, "clock": "06:24:35", "window": "Blender",
+ "appeared": ["render", "options"], "disappeared": ["scene", "viewlayer"]}
+```
+OCR re-runs whenever the frame is not bit-identical to the last one scanned (perceptual hash, 32×32, hamming distance 0) — so a single character appearing is enough to trigger a fresh read; nothing on screen is missed. The tradeoff is that a constantly-changing screen means OCR runs continuously and uses more CPU.
+
+`.tracker_history.log` separately logs every foreground-window switch.
+
+### 7. Precision mode (opt-in, off by default)
+
+Normal tracking stays fast. When you need maximum capture detail, toggle **PRECISION** in the admin panel (or `touch .tracker_precision`) — it switches live, no restart:
+
+| | Normal (default) | Precision |
+|---|---|---|
+| Pixel grid | 16×9 = 144 cells | **48×27 = 1296 cells** of real averaged RGB |
+| Exact-pixel frame | not written | `.live_frame.jpg` rewritten on every visual change, linked from the JSON as `exact_frame_png` |
+| Measured loop | ~3.0ms | ~3.4ms |
+
+**On "data that can rebuild the exact screenshot":** a 1920×1080 frame is ~6.2 MB of raw pixels. Encoding all of them into JSON would be *larger and slower* than just writing an image file, so precision mode writes the real image to disk and links it from the report — you get exact original pixels without a separate screenshot step, and without a 6 MB JSON per frame. (An early attempt that PNG-encoded every frame took the loop from 90ms to 188ms; JPEG at q92, written only when the frame actually changes, made it essentially free.)
+
+### 8. Performance notes (all measured, not assumed)
+
+| Configuration | Fast loop |
+|---|---|
+| Tracker alone, static screen | **~4-9ms** |
+| Tracker + overlay | ~5ms (overlay costs ~0.2 CPU-seconds/min — negligible) |
+| Full stack, constantly-changing screen | ~90ms (OCR firing continuously by design) |
+
+Things that turned out to matter, in order:
+1. **`torch.set_num_threads(2)`** — by default PyTorch spread EasyOCR across every core, consuming ~6 cores' worth (297 CPU-seconds in 50s wall time) and starving everything else. This one line took total CPU from 297 → 58 CPU-seconds.
+2. **Splitting the loop by cost type** — `mss.grab` is ~33ms and full-res `cvtColor` ~12ms, while *every* non-pixel signal (mouse, clicks, window focus, process, idle) costs <1ms combined. Pixel work runs on its own cadence so input signals stay millisecond-fresh.
+3. **Skipping OCR on bit-identical frames** — on a static screen this eliminates essentially all OCR cost.
+4. **Masking the tracker's own overlay/admin windows out of the frame** before OCR/vision — otherwise it recursively reads its own status text back into `TEXT_DATA`.
+
+Things that turned out **not** to matter (measured, so don't re-optimize them): JSON serialization, file writes, window enumeration, clipboard reads, and the GUI processes' refresh rates — all sub-millisecond.
+
+### 9. Verified click-automation pattern (see `click_cat.py` for the reference implementation)
 
 **The one rule that matters:** always re-verify focus (via brightness check or `ACTUAL_FOREGROUND`) **immediately before every single click/keystroke, inside the same script run.** Never split "activate window" and "click" across two separate script invocations — focus reverts to whatever invoked the script (the terminal) the instant a script exits, so a second script starting later can't assume the target is still focused. This was the root cause of nearly every failed automation attempt this session.
 

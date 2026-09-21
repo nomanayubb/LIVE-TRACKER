@@ -39,11 +39,33 @@ WINDOW_CONFIG = BASE_DIR / ".tracker_window_config.txt"
 REFRESH_SIGNAL = BASE_DIR / ".tracker_refresh"
 SNAPSHOT_DIR = BASE_DIR / "tracker_snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
+PROFILE = False   # set False to silence the per-section timing breakdown
 PAUSE_SWITCH = BASE_DIR / ".tracker_paused"          # create this file to instantly pause all capture/reporting
 DENIED_WINDOWS_FILE = BASE_DIR / ".tracker_denied_windows.txt"  # one window-title substring per line = never reported
 STATS_FILE = BASE_DIR / ".tracker_stats.json"
-MAX_SNAPSHOTS = 20
-GRID_COLS, GRID_ROWS = 16, 9  # pixel-grid matrix resolution
+CHANGE_HISTORY = BASE_DIR / ".tracker_change_history.jsonl"  # append-only log of what
+# text appeared/disappeared on screen over time - a replayable record, not just a snapshot
+MAX_SNAPSHOTS = 60
+FRAME_FILE = BASE_DIR / ".live_frame.jpg"
+PRECISION_SWITCH = BASE_DIR / ".tracker_precision"   # create this file to enable precision mode
+
+# Two capture profiles. NORMAL is the default and stays fast (~5-9ms loop).
+# PRECISION is opt-in for when maximum detail matters, and deliberately costs
+# more - measured: the 48x27 grid plus per-change full-frame encoding took the
+# loop from ~90ms to ~188ms. It is never on unless explicitly switched on.
+#
+# Hard limit worth knowing: a true 1920x1080 frame is ~6.2MB of raw pixels.
+# Encoding that into JSON every frame would be both larger and slower than
+# just writing the image, so exact pixels live in FRAME_FILE (linked from the
+# JSON as "exact_frame_png") rather than being inlined as numbers.
+NORMAL_GRID = (16, 9)      # 144 cells  - structural summary, cheap
+PRECISION_GRID = (48, 27)  # 1296 cells - genuine low-res image as data
+
+def precision_on():
+    try:
+        return PRECISION_SWITCH.exists()
+    except Exception:
+        return False
 
 user32 = ctypes.windll.user32
 
@@ -163,6 +185,14 @@ def get_clipboard_text():
     except Exception:
         return ""
 
+# The tracker's own UI windows. They get drawn on top of whatever is being
+# tracked, so without this the tracker captures and OCRs its own status text
+# recursively - pure wasted CPU, and it pollutes TEXT_DATA with its own output.
+OWN_UI_TITLES = ("Tracker Overlay", "Tracker Admin Panel")
+
+def is_own_ui(title):
+    return any(t.lower() in (title or "").lower() for t in OWN_UI_TITLES)
+
 def get_all_windows():
     try:
         return [w for w in gw.getAllWindows() if w.title.strip()]
@@ -182,10 +212,12 @@ def force_activate(window):
 
 # ---------------- pixel-level vision (fast, no OCR) ----------------
 
-def pixel_grid_matrix(img):
+def pixel_grid_matrix(img, cols=None, rows=None):
     """Real per-cell average color across the whole frame - a genuine
     compact numeric picture, not just one brightness scalar."""
-    small = cv2.resize(img[:, :, :3], (GRID_COLS, GRID_ROWS), interpolation=cv2.INTER_AREA)
+    cols = cols or NORMAL_GRID[0]
+    rows = rows or NORMAL_GRID[1]
+    small = cv2.resize(img[:, :, :3], (cols, rows), interpolation=cv2.INTER_AREA)
     # BGR -> RGB, flatten to list of [r,g,b] ints per cell, row-major
     grid = small[:, :, ::-1].astype(int).tolist()
     return grid
@@ -228,6 +260,16 @@ def change_region(prev_gray, curr_gray):
 
 def init_easyocr():
     try:
+        # Cap torch's thread pool BEFORE EasyOCR loads. By default PyTorch spawns
+        # worker threads across every core; measured, that made the tracker consume
+        # ~6 cores' worth of CPU (297 CPU-seconds in 50s wall time), starving the
+        # fast pixel loop (7.5ms -> 251ms) and pushing OCR 15-23s behind. OCR is a
+        # background concern here - it does not need the whole machine.
+        try:
+            import torch
+            torch.set_num_threads(2)
+        except Exception:
+            pass
         import easyocr
         print("Loading EasyOCR (background OCR thread)...")
         try:
@@ -284,7 +326,14 @@ def vision_worker():
 def ocr_worker():
     reader = init_easyocr()
     last_tokens = set()
+    last_phash = None
+    OCR_MIN_INTERVAL = 0.4   # text doesn't change 10x/second; running back-to-back
+                             # was pushing OCR 16-23s behind the live frame
     while not shared["stop"]:
+        cycle_start = time.time()
+        if PAUSE_SWITCH.exists():
+            time.sleep(0.3)
+            continue
         with lock:
             frame = shared["frame"]
             frame_ts = shared["frame_ts"]
@@ -292,8 +341,25 @@ def ocr_worker():
             time.sleep(0.05)
             continue
         try:
+            # Skip the whole expensive OCR pass if the screen is visually unchanged
+            # since the last one - on a static screen this saves ~100% of the cost.
+            try:
+                import vision as _v
+                # Skip ONLY when the frame is bit-identical. Any single change on the
+                # tracked window - one character, one pixel of new text - re-runs OCR,
+                # so nothing that appears on screen is ever missed.
+                phash = _v.perceptual_hash(frame, size=32)   # finer hash = more sensitive
+                if last_phash is not None and _v.hamming_distance(phash, last_phash) == 0:
+                    time.sleep(0.05)
+                    continue
+                last_phash = phash
+            except Exception:
+                pass
+
             h, w = frame.shape[:2]
-            scale = 1080 / h if h > 1080 else 1.0
+            # Cap OCR input height at 720px - UI text stays legible and the pass is
+            # far cheaper than at native 1080p+.
+            scale = 720 / h if h > 720 else 1.0
             proc = cv2.resize(frame, (int(w * scale), 1080), interpolation=cv2.INTER_LINEAR) if scale != 1.0 else frame
             results = reader.readtext(proc, detail=1)
             boxes, texts = [], []
@@ -306,6 +372,24 @@ def ocr_worker():
             text_joined = " | ".join(texts)[:800]
             tokens = set(t.strip().lower() for t in texts if t.strip())
             new_tokens = list(tokens - last_tokens)
+            gone_tokens = list(last_tokens - tokens)
+
+            # Append every text change to a timestamped history, so there's a
+            # replayable record of what appeared/disappeared on screen over time,
+            # not just a snapshot of the current state.
+            if last_tokens and (new_tokens or gone_tokens):
+                try:
+                    entry = {
+                        "t": round(time.time(), 2),
+                        "clock": time.strftime("%H:%M:%S"),
+                        "window": shared.get("ocr_window_label", ""),
+                        "appeared": sorted(new_tokens)[:25],
+                        "disappeared": sorted(gone_tokens)[:25],
+                    }
+                    with open(CHANGE_HISTORY, "a", encoding="utf-8") as hf:
+                        hf.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
             last_tokens = tokens
             with lock:
                 shared["ocr_text"] = text_joined
@@ -316,7 +400,8 @@ def ocr_worker():
         except Exception as e:
             with lock:
                 shared["ocr_text"] = f"OCR error: {e}"
-        time.sleep(0.05)  # brief yield so the fast pixel loop isn't starved of CPU
+        # hold to the minimum interval so OCR can't monopolise the CPU
+        time.sleep(max(0.05, OCR_MIN_INTERVAL - (time.time() - cycle_start)))
 
 # ---------------- fast pixel-capture thread (~30-50ms target) ----------------
 
@@ -336,6 +421,7 @@ def fast_worker(target_window_name):
     PIXEL_INTERVAL = 0.05
     last_pixel_time = 0.0
     cached_pixels = None
+    last_frame_sig = None
     session_start = time.time()
     stats = {"started_at": session_start, "total_iterations": 0, "ocr_passes": 0,
               "clicks_detected": 0, "claude_clicks": 0, "user_clicks": 0,
@@ -371,6 +457,8 @@ def fast_worker(target_window_name):
 
                 iteration += 1
                 now_input = time.time()
+                precision = precision_on()
+                g_cols, g_rows = PRECISION_GRID if precision else NORMAL_GRID
                 stats["total_iterations"] = iteration
                 try:
                     if WINDOW_CONFIG.exists():
@@ -387,7 +475,9 @@ def fast_worker(target_window_name):
                 except Exception:
                     pass
 
+                _t0 = time.perf_counter()
                 all_windows = get_all_windows()
+                t_windows = time.perf_counter() - _t0
                 window_titles = {w.title[:40] for w in all_windows}
                 new_windows = list(window_titles - prev_window_titles)
                 prev_window_titles = window_titles
@@ -396,6 +486,7 @@ def fast_worker(target_window_name):
                 if not current_target and all_windows:
                     current_target = all_windows[0].title
 
+                _t0 = time.perf_counter()
                 try:
                     fg = gw.getActiveWindow()
                     fg_title = fg.title if fg else "Unknown"
@@ -406,6 +497,7 @@ def fast_worker(target_window_name):
                 fg_process, fg_pid = ("Unknown", 0)
                 if fg_hwnd:
                     fg_process, fg_pid = get_process_name_for_hwnd(fg_hwnd)
+                t_fg = time.perf_counter() - _t0
 
                 fg_changed = fg_title != prev_fg_title
                 if fg_changed:
@@ -463,6 +555,7 @@ def fast_worker(target_window_name):
                 # full-res cvtColor at ~12ms, vs <1ms for every non-pixel signal
                 # (mouse/window/process/clicks). So pixel work runs on its own slower
                 # cadence while the input/window signals stay truly millisecond-fresh.
+                _t0 = time.perf_counter()
                 do_pixels = (now_input - last_pixel_time) >= PIXEL_INTERVAL
                 if do_pixels:
                     last_pixel_time = now_input
@@ -478,6 +571,23 @@ def fast_worker(target_window_name):
                     if change_bbox:  # scale bbox back to true screen coordinates
                         change_bbox = tuple(int(v / 0.4) for v in change_bbox)
                     prev_gray = gray
+                    # Black out our own overlay/admin windows where they overlap the
+                    # captured region, so OCR and vision don't recursively read the
+                    # tracker's own status text back into TEXT_DATA.
+                    for ow in all_windows:
+                        if not is_own_ui(ow.title):
+                            continue
+                        try:
+                            ox = ow.left - monitor['left']
+                            oy = ow.top - monitor['top']
+                            x0, y0 = max(0, ox), max(0, oy)
+                            x1 = min(img.shape[1], ox + ow.width)
+                            y1 = min(img.shape[0], oy + ow.height)
+                            if x1 > x0 and y1 > y0:
+                                img[y0:y1, x0:x1] = 0
+                        except Exception:
+                            pass
+
                     cached_pixels = (img, b, change_pct, change_bbox)
                 elif cached_pixels is not None:
                     img, b, change_pct, change_bbox = cached_pixels
@@ -489,7 +599,9 @@ def fast_worker(target_window_name):
                 blob_count, blob_center = detect_selection_outline(img)
                 mouse_x, mouse_y = get_cursor_pos()
                 idle_s = get_idle_seconds()
+                _t0 = time.perf_counter()
                 clipboard = get_clipboard_text()
+                t_clip = time.perf_counter() - _t0
                 claude_activity = ca.get_activity()
 
                 left_down, _right_down = mouse_buttons_down()
@@ -517,12 +629,28 @@ def fast_worker(target_window_name):
                 with lock:
                     shared["frame"] = img.copy()
                     shared["frame_ts"] = now
+                    shared["ocr_window_label"] = current_target or fg_title
                     ocr_text = shared["ocr_text"]
                     ocr_boxes = shared["ocr_boxes"]
                     ocr_ts = shared["ocr_ts"]
                     new_text_tokens = shared["new_text_tokens"]
                     vision_result = shared["vision"]
                     vision_ts = shared["vision_ts"]
+
+                # Keep an exact-pixel image of the current frame on disk, so the JSON
+                # report and the true original pixels are both available without a
+                # separate screenshot step. Written only when the frame actually
+                # changed, and as JPEG: PNG-encoding 1920x1080 every tick measured at
+                # ~100ms+ (loop went 90 -> 188ms), JPEG q92 is a fraction of that.
+                if do_pixels and precision:
+                    try:
+                        cur_sig = int(gray.sum())
+                        if cur_sig != last_frame_sig:
+                            last_frame_sig = cur_sig
+                            cv2.imwrite(str(FRAME_FILE), img[:, :, :3],
+                                        [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                    except Exception:
+                        pass
 
                 if now - last_snapshot_time > 3:
                     try:
@@ -535,6 +663,11 @@ def fast_worker(target_window_name):
                     except Exception:
                         pass
 
+                if PROFILE and iteration % 100 == 0:
+                    print(f"[prof] windows={t_windows*1000:.1f} fg={t_fg*1000:.1f} "
+                          f"clip={t_clip*1000:.1f} pixels={t_pixels*1000:.1f} "
+                          f"write={t_write*1000:.1f} loop={loop_ms:.1f}")
+
                 if iteration % 20 == 0:
                     with lock:
                         stats["ocr_passes"] = shared["ocr_pass_count"]
@@ -545,6 +678,7 @@ def fast_worker(target_window_name):
                     except Exception:
                         pass
 
+                t_pixels = time.perf_counter() - _t0
                 loop_ms = (time.time() - loop_start) * 1000
                 frame_times.append(loop_ms)
                 avg_ms = round(sum(frame_times) / len(frame_times), 1)
@@ -561,16 +695,18 @@ def fast_worker(target_window_name):
                     "brightness": b, "dominant_color": dom_color,
                     "frame_change_pct": change_pct, "frame_change_bbox": change_bbox,
                     "selection_blob_count": blob_count, "selection_blob_center": blob_center,
-                    "pixel_grid": grid, "grid_cols": GRID_COLS, "grid_rows": GRID_ROWS,
+                    "pixel_grid": grid, "grid_cols": g_cols, "grid_rows": g_rows, "precision_mode": precision,
                     "text_data": ocr_text, "ocr_boxes": ocr_boxes, "ocr_age_ms": ocr_age_ms,
                     "new_text_tokens": new_text_tokens, "clipboard": clipboard,
                     "claude_active": claude_activity["active"], "claude_window": claude_activity["window"],
                     "claude_action": claude_activity["action"], "claude_private": claude_activity["private"],
                     "last_click": last_click_info,
+                    "exact_frame_png": str(FRAME_FILE) if precision else None,
                     "vision": vision_result,
                     "vision_age_ms": round((now - vision_ts) * 1000, 0) if vision_ts else -1,
                     "status": "Running"
                 }
+                _t0 = time.perf_counter()
                 with open(JSON_FILE, "w", encoding="utf-8") as jf:
                     json.dump(data, jf, ensure_ascii=False)
 
@@ -595,7 +731,7 @@ DOMINANT_COLOR: {dom_color}
 FRAME_CHANGE_PCT: {change_pct}
 FRAME_CHANGE_BBOX: {change_bbox}
 SELECTION_BLOBS: {blob_count} center={blob_center}
-PIXEL_GRID_{GRID_COLS}x{GRID_ROWS}: see JSON file for full matrix
+PIXEL_GRID_{g_cols}x{g_rows}: {g_cols*g_rows} cells of real averaged RGB (full matrix in .json)
 OCR_AGE_MS: {ocr_age_ms}
 NEW_TEXT: {new_text_tokens[:10]}
 CLIPBOARD: {clipboard[:80]}
@@ -612,11 +748,14 @@ VISION_LAYOUT: {vision_result.get('layout', {})}
 VISION_EDGE_DENSITY: {vision_result.get('edges', {}).get('total_edge_density_pct', '-')}%
 VISION_CHANGED_CELLS: {len(vision_result.get('region_change', {}).get('changed_cells', []))}
 VISION_PHASH: {vision_result.get('phash', '-')[:32]}
+PRECISION_MODE: {'ON' if precision else 'off (default - create .tracker_precision to enable)'}
+EXACT_FRAME: {FRAME_FILE if precision else '- (precision mode off)'}
 TEXT_DATA: {ocr_text}
 STATUS: Running
 """
                 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                     f.write(txt)
+                t_write = time.perf_counter() - _t0
 
                 if iteration % 40 == 0:
                     print(f"[{iteration}] fg={fg_title[:20]} loop_ms={loop_ms:.1f} avg={avg_ms} ocr_age={ocr_age_ms}ms")

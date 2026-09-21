@@ -79,6 +79,29 @@ toggle_btn = tk.Button(header, text="STOP", command=toggle_pause, width=14,
                        relief="flat", cursor="hand2")
 toggle_btn.pack(side="right")
 
+PRECISION_SWITCH = BASE_DIR / ".tracker_precision"
+
+def toggle_precision():
+    """Precision mode: much richer per-frame detail (48x27 real-colour pixel
+    grid + exact frame image saved on every change) at a real speed cost
+    (measured ~90ms -> ~188ms loop). Off by default so normal tracking stays
+    fast; turn it on only when maximum capture detail actually matters."""
+    if PRECISION_SWITCH.exists():
+        try:
+            PRECISION_SWITCH.unlink()
+        except Exception:
+            pass
+    else:
+        try:
+            PRECISION_SWITCH.write_text("precision mode on", encoding="utf-8")
+        except Exception:
+            pass
+
+precision_btn = tk.Button(header, text="PRECISION: off", command=toggle_precision,
+                          width=18, font=("Segoe UI", 10, "bold"), bg="#30363d",
+                          fg=FG, relief="flat", cursor="hand2")
+precision_btn.pack(side="right", padx=(0, 10))
+
 # ---------------- Claude operating status ----------------
 claude_frame = tk.LabelFrame(root, text=" Claude activity ", bg=BG, fg=ACCENT,
                              font=("Segoe UI", 10, "bold"), bd=1, relief="solid")
@@ -184,7 +207,14 @@ def refresh():
             f"OCR text age: {data.get('ocr_age_ms','-')}ms"
         ))
 
+    if PRECISION_SWITCH.exists():
+        precision_btn.config(text="PRECISION: ON", bg=ACCENT, fg="#0d1117")
+    else:
+        precision_btn.config(text="PRECISION: off", bg="#30363d", fg=FG)
+
     stats_label.config(text=(
+        f"Capture detail        : {data.get('grid_cols','-')}x{data.get('grid_rows','-')} "
+        f"pixel grid  ({'PRECISION' if data.get('precision_mode') else 'normal'} mode)\n"
         f"Uptime                : {stats.get('uptime_seconds','-')}s\n"
         f"Frames captured       : {stats.get('total_iterations','-')}\n"
         f"OCR text scans done   : {stats.get('ocr_passes','-')}\n"
@@ -198,7 +228,9 @@ def refresh():
     if titles:
         rebuild_window_list(titles)
 
-    root.after(400, refresh)
+    # 200ms: measured, this panel uses ~0.2 CPU-seconds per minute (essentially
+    # nothing) - the tracker's own torch threads were the real CPU hog, not this.
+    root.after(200, refresh)
 
 refresh()
 root.mainloop()
