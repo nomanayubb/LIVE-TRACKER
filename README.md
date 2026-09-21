@@ -332,6 +332,19 @@ Verified against real apps, not assumed:
 - `rotate()` (two-finger rotate) is deliberately **not implemented** — it raises rather than faking it. No wheel/keyboard convention reaches most apps for rotation; the few apps that do support it (some CAD/image viewers) need Windows' Touch Injection API (`InitializeTouchInjection`/`InjectTouchInput`), a much larger addition than a wheel event. If a specific app needs this, check for a dedicated rotate hotkey first and use `hotkey()`.
 - **Blender doesn't use the Ctrl+Scroll zoom convention** — it zooms on plain scroll instead (confirmed: plain `scroll()` moved its viewport, delta 2.86; `zoom()`'s Ctrl+wheel did nothing there). That's Blender's own binding choice, not a flaw in `zoom()` — the method itself is proven to work via the File Explorer test above.
 
+**All six two/one-finger patterns, mapped:**
+
+| Finger pattern | Method |
+|---|---|
+| Fingers spreading apart (pinch out) | `zoom(positive_amount)` |
+| Fingers coming together (pinch in) | `zoom(negative_amount)` |
+| Two fingers up | `swipe("up")` |
+| Two fingers down | `swipe("down")` |
+| Two fingers left | `swipe("left")` |
+| Two fingers right | `swipe("right")` |
+
+All six accept `modifiers=["ctrl"]`, `["shift"]`, or `["ctrl","shift"]` — every combination was tested and works. One test artifact worth knowing: an early combinatorial test showed `swipe("left", modifiers=["ctrl"])` and `swipe("left", modifiers=["shift"])` producing **exactly** zero visible change, which looked like a real failure — until the same calls were retried on a genuinely fresh window with no prior scroll history and worked immediately (delta 3.11). The cause was **not a code bug**: repeatedly testing many left/right combos in a row on one window exhausted that window's limited horizontal scroll range, so later calls in the same direction had nowhere left to move — indistinguishable from a broken gesture unless you reset to a known-fresh state between measurements. If a modifier combo appears to do nothing, try it on a fresh window/scroll position before concluding it's unsupported.
+
 None of `clicker.py` is Blender-specific — Blender and File Explorer were just convenient already-open test targets, the same role Notepad played for the drag/scroll/CapsLock testing earlier. `Clicker(window_title)` takes any window title substring.
 
 ### 11. `replay.py` — turn recorded history into images/video, for a human, fast
