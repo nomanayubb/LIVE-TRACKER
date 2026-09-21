@@ -199,7 +199,15 @@ def apply(name):
 
 def current():
     """What's actually on right now, read from the live switches (not just the
-    recorded name - the switches are the truth, they can be flipped directly)."""
+    recorded name - the switches are the truth, they can be flipped directly).
+
+    Several profiles share identical switches (normal/motion_capture/ui_automation
+    are all paused=False, precision=False - they differ in which OTHER module you
+    use, not in these two flags). Picking the first dict match by switch value
+    alone made applying motion_capture immediately get reported back as "normal",
+    even though the recorded profile was correct. Prefer the recorded profile
+    whenever its switches still agree with what's actually live; only fall back
+    to a plain switch search if the recorded name is missing, unknown, or stale."""
     paused = PAUSE_SWITCH.exists()
     precision = PRECISION_SWITCH.exists()
     recorded = ""
@@ -207,9 +215,15 @@ def current():
         recorded = ACTIVE_FILE.read_text(encoding="utf-8").strip()
     except Exception:
         pass
-    match = next((n for n, p in PROFILES.items()
-                  if p["switches"]["paused"] == paused
-                  and p["switches"]["precision"] == precision), None)
+
+    def switches_match(name):
+        sw = PROFILES[name]["switches"]
+        return sw["paused"] == paused and sw["precision"] == precision
+
+    if recorded in PROFILES and switches_match(recorded):
+        match = recorded
+    else:
+        match = next((n for n in PROFILES if switches_match(n)), None)
     return {"paused": paused, "precision": precision,
             "recorded_profile": recorded, "matching_profiles": match}
 
