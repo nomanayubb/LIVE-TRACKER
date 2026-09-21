@@ -231,9 +231,21 @@ class Clicker:
                 x2, y2 = win.left + x2, win.top + y2
             before = self._shot("before")
             ca.log_click(x1, y1, button)
+            # Step the movement explicitly rather than relying on a single
+            # moveTo(duration=...). Tested against Notepad text selection, one
+            # long move produced no selection at all for horizontal drags while
+            # a diagonal one happened to work - apps track drags by watching a
+            # stream of mouse-move events, so a sparse path is unreliable.
             pyautogui.moveTo(x1, y1)
+            time.sleep(0.08)
             pyautogui.mouseDown(button=button)
-            pyautogui.moveTo(x2, y2, duration=duration)
+            time.sleep(0.12)                 # let the app register the press
+            steps = max(12, int(max(abs(x2 - x1), abs(y2 - y1)) / 12))
+            for i in range(1, steps + 1):
+                pyautogui.moveTo(x1 + (x2 - x1) * i / steps,
+                                 y1 + (y2 - y1) * i / steps)
+                time.sleep(duration / steps)
+            time.sleep(0.12)                 # settle before releasing
             pyautogui.mouseUp(button=button)
             time.sleep(0.2)
             return {"ok": True, "from": [x1, y1], "to": [x2, y2],
@@ -241,20 +253,84 @@ class Clicker:
         finally:
             self._done()
 
-    def scroll(self, amount, x=None, y=None, relative=True):
+    def _send_wheel(self, clicks):
+        """Send wheel input via SendInput.
+
+        pyautogui.scroll() was verified to do NOTHING on Windows 11 Notepad -
+        measured a pixel delta of 0.00 across repeated attempts while a
+        PageDown keypress moved the view by 7.86. Its wheel events don't reach
+        modern WinUI apps. SendInput with MOUSEEVENTF_WHEEL does."""
+        MOUSEEVENTF_WHEEL = 0x0800
+        WHEEL_DELTA = 120
+
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                        ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+                        ("time", ctypes.c_ulong),
+                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+        class _INPUTunion(ctypes.Union):
+            _fields_ = [("mi", MOUSEINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong), ("union", _INPUTunion)]
+
+        sent = 0
+        for _ in range(abs(int(clicks))):
+            mi = MOUSEINPUT(0, 0, ctypes.c_ulong(WHEEL_DELTA if clicks > 0 else -WHEEL_DELTA & 0xFFFFFFFF),
+                            MOUSEEVENTF_WHEEL, 0, None)
+            inp = INPUT(0, _INPUTunion(mi=mi))
+            sent += ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            time.sleep(0.02)
+        return sent
+
+    def scroll(self, amount, x=None, y=None, relative=True, fallback_keys=True):
         """Scroll wheel. Positive = up/away, negative = down/toward. If x/y are
         given the pointer moves there first, which matters in apps where scroll
-        applies to whatever is under the cursor."""
+        applies to whatever is under the cursor.
+
+        Falls back to PageUp/PageDown if wheel input produces no visible change -
+        some apps ignore synthetic wheel events entirely but honour keys."""
         win = self._guard(f"scroll {amount}")
         try:
             if x is not None and y is not None:
                 sx, sy = (win.left + x, win.top + y) if relative else (x, y)
                 pyautogui.moveTo(sx, sy)
-            pyautogui.scroll(amount)
-            time.sleep(0.2)
-            return {"ok": True, "amount": amount, "after": self._shot("scroll")}
+                time.sleep(0.1)
+
+            before = self._region_fingerprint()
+            self._send_wheel(amount)
+            time.sleep(0.35)
+            method = "wheel"
+
+            if fallback_keys and self._region_unchanged(before):
+                key = "pagedown" if amount < 0 else "pageup"
+                for _ in range(max(1, abs(int(amount)) // 5)):
+                    pyautogui.press(key)
+                    time.sleep(0.1)
+                time.sleep(0.25)
+                method = "keys"
+
+            moved = not self._region_unchanged(before)
+            return {"ok": True, "amount": amount, "method": method,
+                    "content_moved": moved, "after": self._shot("scroll")}
         finally:
             self._done()
+
+    def _region_fingerprint(self):
+        try:
+            img, _ = self.grab()
+            return img[:, :, :3].astype(np.int16)
+        except Exception:
+            return None
+
+    def _region_unchanged(self, before, threshold=1.0):
+        if before is None:
+            return False
+        after = self._region_fingerprint()
+        if after is None or after.shape != before.shape:
+            return False
+        return float(np.abs(after - before).mean()) < threshold
 
     # ---------------------------------------------------------------- keyboard
 
