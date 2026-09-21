@@ -102,6 +102,128 @@ precision_btn = tk.Button(header, text="PRECISION: off", command=toggle_precisio
                           fg=FG, relief="flat", cursor="hand2")
 precision_btn.pack(side="right", padx=(0, 10))
 
+# ---------------- Settings / reference window ----------------
+# Surfaces the same mode table and JSON field reference that live in
+# README.md, but inside the app itself - so a user watching this panel does
+# not need to go find and open a text file to know what a field means or
+# which mode to pick for a task.
+JSON_FIELD_REFERENCE = """
+COMPLETE .live_screen_state.json FIELD REFERENCE
+(every key dual_tracker.py actually writes - see README.md for the same
+table kept in sync)
+
+  timestamp, frame_ts        Unix time of this report / of the last pixel capture
+  iteration, total_iterations  Fast-loop tick counter
+  loop_ms, avg_loop_ms        This tick's duration / rolling average (headline speed)
+  status                      "Running" or "PAUSED"
+  mouse_x, mouse_y            Live cursor position
+  idle_seconds                Seconds since last input
+  screen_resolution, monitor, monitor_count   Display geometry
+  actual_foreground, foreground_process,      The genuinely focused window right
+  foreground_pid, foreground_changed          now, regardless of tracker target
+  target_window, target_window_obj,           What the tracker is pointed at,
+  target_alive, target_state                  and its window state
+  watched_windows              Secondary windows from a comma-separated config
+  window_list, available_windows, new_windows All visible window titles / new ones
+  clipboard                    Current clipboard text (first 200 chars)
+  brightness, dominant_color   Pixel-grid summary stats
+  pixel_grid, grid_cols, grid_rows   RGB colour grid (16x9 normal / 48x27 precision)
+  precision_mode               Whether the richer grid + exact frame are active
+  exact_frame_png              Path to the sharp JPEG, only when precision_mode=true
+  frame_change_pct, frame_change_bbox   How much of the screen changed, and where
+  selection_blob_count/_center Orange-outline (Blender-style selection) detector
+  text_data, ocr_text, ocr_boxes, ocr_ts, ocr_age_ms,   OCR output, freshness, and
+  ocr_pass_count, ocr_passes, new_text_tokens           newly-appeared text
+  vision, vision_ts, vision_age_ms, vision_pass_count   Full vision.py structural
+                                                          scan and its freshness
+  last_click, clicks_detected, claude_clicks, user_clicks,   Click attribution -
+  by, app_title, app_process, app_pid, app_layer,            who clicked, where,
+  claude_delay_s                                             in which app
+  claude_active, claude_action, claude_window, claude_private  What claude_activity.py
+                                                                 says Claude is doing
+  denied_window_blocks, paused_ticks   Admin-panel enforcement counters
+  started_at                   When this tracker process started
+
+If a field isn't listed here, it doesn't exist - check dual_tracker.py's
+source for the literal string before assuming it's just undocumented.
+"""
+
+def open_settings():
+    win = tk.Toplevel(root)
+    win.title("Settings / Reference")
+    win.geometry("820x640")
+    win.configure(bg=BG)
+    # Without this, the Toplevel can register with Windows (correct title,
+    # geometry) but never actually get raised above whatever else is
+    # foreground - verified: a screenshot of its exact screen region showed
+    # a completely different app's content because this window opened behind
+    # it. lift()+focus_force() ensures it's genuinely on top and interactive.
+    win.lift()
+    win.focus_force()
+    win.attributes("-topmost", True)
+    win.after(200, lambda: win.attributes("-topmost", False))
+
+    nb = ttk.Style()
+    nb.theme_use("default")
+    nb.configure("TNotebook", background=BG, borderwidth=0)
+    nb.configure("TNotebook.Tab", background="#30363d", foreground=FG, padding=[12, 6])
+    nb.map("TNotebook.Tab", background=[("selected", ACCENT)], foreground=[("selected", "#0d1117")])
+
+    tabs = ttk.Notebook(win)
+    tabs.pack(fill="both", expand=True, padx=10, pady=10)
+
+    # --- Modes tab ---
+    modes_tab = tk.Frame(tabs, bg=BG)
+    tabs.add(modes_tab, text="Modes")
+    if _modes:
+        for name, p in _modes.PROFILES.items():
+            box = tk.LabelFrame(modes_tab, text=f" {name} ", bg=BG, fg=ACCENT,
+                                font=("Segoe UI", 10, "bold"), bd=1, relief="solid")
+            box.pack(fill="x", padx=8, pady=4)
+            on = [k.upper() for k, v in p["switches"].items() if v] or ["-"]
+            off = [k for k, v in p["switches"].items() if not v] or ["-"]
+            text = (f"{p['summary']}\n"
+                    f"ON: {', '.join(on)}   OFF: {', '.join(off)}\n"
+                    f"speed: {p['performance']}")
+            tk.Label(box, text=text, justify="left", anchor="w", bg=BG, fg=FG,
+                    font=("Consolas", 9), padx=8, pady=4, wraplength=760).pack(fill="x")
+
+    # --- Field reference tab ---
+    fields_tab = tk.Frame(tabs, bg=BG)
+    tabs.add(fields_tab, text="JSON Fields")
+    txt = tk.Text(fields_tab, bg="#0d1117", fg=FG, font=("Consolas", 9),
+                  wrap="none", padx=10, pady=10, relief="flat")
+    txt.insert("1.0", JSON_FIELD_REFERENCE.strip())
+    txt.config(state="disabled")
+    txt.pack(fill="both", expand=True)
+
+    # --- Files tab ---
+    files_tab = tk.Frame(tabs, bg=BG)
+    tabs.add(files_tab, text="Files & Control")
+    files_text = (
+        "LIVE OUTPUT\n"
+        "  .live_screen_state.txt / .json   rewritten every fast-loop tick\n"
+        "  .live_frame.jpg                  exact-pixel frame (precision mode only)\n"
+        "  tracker_snapshots/                rotating buffer, one saved every ~3s\n\n"
+        "HISTORY (append-only logs, never overwritten)\n"
+        "  .tracker_history.log             every foreground-window switch\n"
+        "  .tracker_change_history.jsonl    every on-screen text change\n"
+        "  .tracker_click_history.jsonl     every click, with attribution\n\n"
+        "LIVE CONTROL (create/write these while the tracker runs)\n"
+        "  .tracker_paused                  create to instantly halt all capture\n"
+        "  .tracker_precision               create to enable precision mode\n"
+        "  .tracker_window_config.txt       write window title(s), comma-separated\n"
+        "  .tracker_denied_windows.txt      one blocked window-title substring per line\n"
+        "  .tracker_refresh                 create to force one re-activation\n"
+    )
+    tk.Label(files_tab, text=files_text, justify="left", anchor="nw", bg=BG, fg=FG,
+             font=("Consolas", 9), padx=10, pady=10).pack(fill="both", expand=True)
+
+settings_btn = tk.Button(header, text="Settings", command=open_settings,
+                         width=10, font=("Segoe UI", 10, "bold"), bg="#30363d",
+                         fg=FG, relief="flat", cursor="hand2")
+settings_btn.pack(side="right", padx=(0, 10))
+
 # ---------------- task mode selector ----------------
 try:
     import modes as _modes
