@@ -163,11 +163,23 @@ class Clicker:
 
     # ---------------------------------------------------------------- capture
 
+    def origin(self):
+        """Screen coordinate that window-relative (0,0) maps to.
+
+        Maximised windows sit at negative coordinates on Windows (Blender
+        reports (-9,-9)) because of invisible resize borders. grab() clamps
+        those to 0, so anything measured off a screenshot is relative to the
+        CLAMPED origin. click_at must use the same origin or every click is
+        offset by that difference - which silently missed menu items by ~9px."""
+        win = self._find_window()
+        return max(0, win.left), max(0, win.top)
+
     def grab(self):
         """Screenshot of the target window's region (BGRA numpy array)."""
         win = self._find_window()
+        ox, oy = max(0, win.left), max(0, win.top)
         with mss.mss() as sct:
-            mon = {"top": max(0, win.top), "left": max(0, win.left),
+            mon = {"top": oy, "left": ox,
                    "width": max(10, win.width), "height": max(10, win.height)}
             return np.array(sct.grab(mon)), mon
 
@@ -190,7 +202,8 @@ class Clicker:
         screen coordinates break the moment the window moves."""
         win = self._guard(desc or f"click ({x},{y})")
         try:
-            sx, sy = (win.left + x, win.top + y) if relative else (x, y)
+            ox, oy = self.origin()
+            sx, sy = (ox + x, oy + y) if relative else (x, y)
             before = self._shot("before")
             ca.log_click(sx, sy, button)
             pyautogui.click(sx, sy, clicks=clicks, button=button)
@@ -214,7 +227,8 @@ class Clicker:
         """Move without clicking - reveals tooltips, opens hover menus."""
         win = self._guard(f"hover ({x},{y})")
         try:
-            sx, sy = (win.left + x, win.top + y) if relative else (x, y)
+            ox, oy = self.origin()
+            sx, sy = (ox + x, oy + y) if relative else (x, y)
             pyautogui.moveTo(sx, sy)
             time.sleep(settle)
             return {"ok": True, "x": sx, "y": sy, "after": self._shot("hover")}
@@ -227,8 +241,9 @@ class Clicker:
         win = self._guard(f"drag ({x1},{y1})->({x2},{y2})")
         try:
             if relative:
-                x1, y1 = win.left + x1, win.top + y1
-                x2, y2 = win.left + x2, win.top + y2
+                ox, oy = self.origin()
+                x1, y1 = ox + x1, oy + y1
+                x2, y2 = ox + x2, oy + y2
             before = self._shot("before")
             ca.log_click(x1, y1, button)
             # Step the movement explicitly rather than relying on a single
@@ -294,7 +309,8 @@ class Clicker:
         win = self._guard(f"scroll {amount}")
         try:
             if x is not None and y is not None:
-                sx, sy = (win.left + x, win.top + y) if relative else (x, y)
+                ox, oy = self.origin()
+                sx, sy = (ox + x, oy + y) if relative else (x, y)
                 pyautogui.moveTo(sx, sy)
                 time.sleep(0.1)
 

@@ -45,3 +45,20 @@ rebuilt_from_grid*.jpg
 motion_out/
 .tracker_active_mode.txt
 mode_comparison.jpg
+
+# Debug/diagnostic screenshots from the rigging investigation - useful in the
+# moment, not useful as repo history. The scripts that produced them ARE kept.
+bl_*.jpg
+rig_*.jpg
+fix_*.jpg
+geom_*.jpg
+multi_*.jpg
+repair_*.jpg
+direct_*.jpg
+recover*.jpg
+audit*.jpg
+check_multibone_state.jpg
+final_result.jpg
+safe_look.jpg
+blender_now.jpg
+_strip.png
