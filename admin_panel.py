@@ -102,6 +102,41 @@ precision_btn = tk.Button(header, text="PRECISION: off", command=toggle_precisio
                           fg=FG, relief="flat", cursor="hand2")
 precision_btn.pack(side="right", padx=(0, 10))
 
+# ---------------- task mode selector ----------------
+try:
+    import modes as _modes
+except Exception:
+    _modes = None
+
+if _modes:
+    mode_frame = tk.LabelFrame(root, text=" Task mode (one click sets every switch correctly) ",
+                               bg=BG, fg=ACCENT, font=("Segoe UI", 10, "bold"),
+                               bd=1, relief="solid")
+    mode_frame.pack(fill="x", padx=14, pady=6)
+    btn_row = tk.Frame(mode_frame, bg=BG)
+    btn_row.pack(fill="x", padx=8, pady=(8, 2))
+
+    mode_buttons = {}
+
+    def _apply_mode(name):
+        try:
+            _modes.apply(name)
+        except Exception:
+            pass
+
+    for _name in _modes.PROFILES:
+        b = tk.Button(btn_row, text=_name.replace("_", " "),
+                      command=lambda n=_name: _apply_mode(n),
+                      font=("Segoe UI", 9), bg="#30363d", fg=FG,
+                      relief="flat", cursor="hand2", padx=6)
+        b.pack(side="left", padx=3)
+        mode_buttons[_name] = b
+
+    mode_desc = tk.Label(mode_frame, text="", justify="left", anchor="w", bg=BG,
+                         fg="#8b949e", font=("Consolas", 9), padx=10, pady=6,
+                         wraplength=720)
+    mode_desc.pack(fill="x")
+
 # ---------------- Claude operating status ----------------
 claude_frame = tk.LabelFrame(root, text=" Claude activity ", bg=BG, fg=ACCENT,
                              font=("Segoe UI", 10, "bold"), bd=1, relief="solid")
@@ -211,6 +246,20 @@ def refresh():
         precision_btn.config(text="PRECISION: ON", bg=ACCENT, fg="#0d1117")
     else:
         precision_btn.config(text="PRECISION: off", bg="#30363d", fg=FG)
+
+    if _modes:
+        cur = _modes.current()
+        active = cur.get("matching_profiles")
+        for nm, btn in mode_buttons.items():
+            if nm == active:
+                btn.config(bg=ACCENT, fg="#0d1117", font=("Segoe UI", 9, "bold"))
+            else:
+                btn.config(bg="#30363d", fg=FG, font=("Segoe UI", 9))
+        if active:
+            p = _modes.PROFILES[active]
+            mode_desc.config(text=f"{p['summary']}\nspeed: {p['performance']}")
+        else:
+            mode_desc.config(text="Custom switch combination (not a named profile)")
 
     stats_label.config(text=(
         f"Capture detail        : {data.get('grid_cols','-')}x{data.get('grid_rows','-')} "

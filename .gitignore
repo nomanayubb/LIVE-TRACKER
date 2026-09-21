@@ -42,3 +42,5 @@ tracker_snapshots/
 replay_out/
 clicker_shots/
 rebuilt_from_grid*.jpg
+motion_out/
+.tracker_active_mode.txt

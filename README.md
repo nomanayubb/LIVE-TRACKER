@@ -6,6 +6,15 @@ A real-time, non-Blender-specific screen-awareness system: it watches whatever w
 
 **If you (human or Claude) are opening this project in a brand-new session for the first time: stop and read this entire README top to bottom before touching any file or running any command.** It is the single source of truth for what exists, what works, what's deprecated, and what's still broken. Do not assume anything from a chat summary or memory snapshot — this file is more current than either.
 
+### Claude: do this at the start of every session
+
+1. Read this README fully.
+2. Run `python modes.py list` to see every capture profile and `python modes.py show` for what's currently active.
+3. **When the user gives you a task, state which mode it needs before starting** — e.g. *"this is UI automation, so precision should be OFF; expect ~3-9ms loop"*. Use `python modes.py recommend "<their task>"` if unsure.
+4. You can set it yourself with `modes.apply("<profile>")`, or tell the user to click that mode's button in the admin panel — whichever they prefer. Say which one you're doing.
+5. If a task needs **sharp, readable frames**, that means `precision` ON — the exact-pixel image lands at `.live_frame.jpg`. Never try to read text from a grid reconstruction; it's a 1600× compression and will not be legible.
+6. Never leave a heavy mode on after the task that needed it is done — switch back to `normal`.
+
 **Any time you add, change, or remove anything here, update this README in the same session, before moving on to the next task — never defer it "for later."** Specifically:
 
 | If you change/add...                          | You MUST update...                                              |
@@ -118,6 +127,48 @@ Normal tracking stays fast. When you need maximum capture detail, toggle **PRECI
 | Measured loop | ~3.0ms | ~3.4ms |
 
 **On "data that can rebuild the exact screenshot":** a 1920×1080 frame is ~6.2 MB of raw pixels. Encoding all of them into JSON would be *larger and slower* than just writing an image file, so precision mode writes the real image to disk and links it from the report — you get exact original pixels without a separate screenshot step, and without a 6 MB JSON per frame. (An early attempt that PNG-encoded every frame took the loop from 90ms to 188ms; JPEG at q92, written only when the frame actually changes, made it essentially free.)
+
+### 7a. `modes.py` — every capture profile in one place
+
+Rather than remembering which switches to flip, name the task:
+
+```bash
+python modes.py list                    # all profiles, what they do, measured speed
+python modes.py show                    # what's active right now
+python modes.py apply ui_automation     # switch
+python modes.py recommend "read a long log"   # pick one from a plain description
+```
+
+| Profile | Precision | Use for | Measured speed |
+|---|---|---|---|
+| `normal` | off | default; general awareness, background use | ~3-9ms loop |
+| `ui_automation` | off | clicking menus/buttons, verifying steps | ~3-9ms; vision ~250ms gives click targets |
+| `text_reading` | **ON** | dense/small text, logs, code | ~3.4ms; sharp frame per change |
+| `evidence` | **ON** | before/after, replay, recording a run | ~3.4ms; replay rebuilds 90 img/sec |
+| `motion_capture` | off | motion blur, video, high fps | 1280×720 → **47fps**; use `motion.py`, not the tracker |
+| `privacy` | off (paused) | banking, passwords, anything private | no capture at all |
+
+The admin panel has a one-click button per profile, and highlights the active one.
+
+### 7c. `motion.py` — high-FPS region capture and motion blur
+
+Separate from the tracker because it's a different profile entirely: the tracker samples cheaply and slowly (UI changes slowly); this grabs a fixed region as fast as the OS allows and keeps real frames in memory.
+
+**Measured capture ceiling** (mss; DXGI/`dxcam` unavailable offline):
+
+| Region | FPS |
+|---|---|
+| 1920×1080 full screen | ~22 |
+| 1280×720 | **~47** |
+| 960×540 | ~56 |
+
+The ~18ms per-grab cost is **fixed overhead, not proportional to pixel count** — so full-screen is what hurts (34ms), and shrinking below 960×540 buys nothing. Capture only the region you need.
+
+Blur modes (measured): `motion_blur` accumulate ~69ms · `directional_blur` ~40ms · `selective_blur` ~120ms.
+
+- **accumulate** — weighted blend of the last N real frames. This is what a physical shutter does (light integrated over the exposure), so moving things smear while static things stay sharp — unlike a filter applied to one still image, which smears everything equally.
+- **directional** — optical flow estimates the dominant motion vector, then blurs along it. Correct when the whole scene moves coherently (a spinning wheel, a pan).
+- **selective** — blurs only the pixels that actually moved, keeping static UI (scoreboards, overlays, text) crisp.
 
 ### 7b. Which mode to use for which task
 
