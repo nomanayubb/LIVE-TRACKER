@@ -1,0 +1,31 @@
+venv/
+__pycache__/
+*.log
+*.pyc
+
+# Blender-rigging-task-specific files - not part of the general-purpose tracker tool
+click_cat.py
+click_target.py
+select_by_name.py
+do_rigging.py
+blender_automation_final.py
+automate_rigging.py
+focus_and_automate.py
+run_rigging.py
+multi_handler_system.py
+multi_handler_system_v2.py
+multi_handler_system_v3.py
+import_cat.py
+import_model.py
+mcp_server.py
+cat_model.glb
+rigging_snapshots/
+legacy_state/
+
+# Runtime output - live data, not source, regenerated every run
+.live_screen_state.txt
+.live_screen_state.json
+.tracker_history.log
+.tracker_window_config.txt
+.tracker_refresh
+tracker_snapshots/

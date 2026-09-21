@@ -1,0 +1,77 @@
+LIVE TRACKER SETUP GUIDE
+=======================
+
+✨ AUTOMATED SETUP (RECOMMENDED)
+================================
+
+STEP 1: Run setup script (ONE TIME ONLY)
+----------------------------------------
+Double-click:
+  setup_venv.bat
+
+This will:
+  ✓ Create a virtual environment (isolated)
+  ✓ Install all dependencies safely
+  ✓ Not interfere with other projects
+
+Wait for it to complete (2-3 minutes).
+
+
+STEP 2: Start the tracker
+-------------------------
+Double-click:
+  start_tracker.bat
+
+You should see:
+  ✓ EasyOCR imported
+  ✓ Starting live tracker...
+  [10] Yes | Brightness: 128
+  [20] Yes | Brightness: 135
+
+Keep this window open!
+
+
+STEP 3: Check Live State
+------------------------
+Open PowerShell and run:
+
+  type $HOME/.live_screen_state.txt
+
+Shows the current captured state (updated every 100ms).
+
+
+STEP 4: Use with Claude Code
+----------------------------
+Once running, Claude reads the live state to see:
+- What's on your Blender screen
+- UI elements and brightness
+- Text detected on screen
+- Blender mode (Object/Edit/Pose/Weight Paint)
+
+
+FILES:
+======
+  • setup_venv.bat - Setup script (run once)
+  • start_tracker.bat - Start tracker (run every time)
+  • live_tracker.py - Main tracker script
+  • mcp_server.py - Server for Claude integration
+  • requirements.txt - Dependencies
+  • README.md - Full documentation
+
+
+WHY VIRTUAL ENVIRONMENT?
+=========================
+✓ Isolated from your other projects
+✓ No conflicts with other Python packages
+✓ Safe and professional
+✓ Easy to remove (just delete the folder)
+
+
+QUICK START:
+============
+1. Double-click: setup_venv.bat (one time)
+2. Double-click: start_tracker.bat (every time)
+3. Tell Claude Code: "Tracker is running"
+4. Claude fixes your Blender issue!
+
+Ready? Start with: setup_venv.bat
