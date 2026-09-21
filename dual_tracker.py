@@ -452,6 +452,7 @@ def fast_worker(target_window_name):
     iteration = 0
     last_snapshot_time = 0
     last_click_info = None
+    pending_explorer_clicks = []   # explorer.exe clicks awaiting a foreground change to link to
     # Pixel capture (mss.grab ~33ms + cvtColor ~12ms) runs on this slower cadence;
     # the input/window signals below it run every tick at sub-millisecond cost.
     PIXEL_INTERVAL = 0.05
@@ -710,6 +711,47 @@ def fast_worker(target_window_name):
                     per_app = stats.setdefault("clicks_per_app", {})
                     key = f"{target_app['title'][:30]} [{source}]"
                     per_app[key] = per_app.get(key, 0) + 1
+
+                    # Both the taskbar and the desktop are owned by
+                    # explorer.exe, so a click launching/switching to an app
+                    # via either one is correctly attributed to explorer.exe
+                    # at click time - but that tells you nothing about WHICH
+                    # app the icon represented. Track it and link it to
+                    # whatever becomes foreground shortly after.
+                    if target_app["process"].lower() == "explorer.exe":
+                        pending_explorer_clicks.append({**last_click_info, "click_ts": click_ts})
+
+                # Resolve any pending explorer.exe click whose target app has
+                # now become foreground - write a follow-up record linking
+                # them, and drop entries that waited too long (that click
+                # likely hit empty desktop/taskbar space, not an app icon).
+                if pending_explorer_clicks and fg_changed and fg_title and fg_process.lower() != "explorer.exe":
+                    still_pending = []
+                    for pc in pending_explorer_clicks:
+                        age = time.time() - pc["click_ts"]
+                        if age > 3.0:
+                            continue  # too late to be this click's result - drop it
+                        if age < 0.05:
+                            still_pending.append(pc)  # too soon, foreground may not have settled
+                            continue
+                        try:
+                            with open(CLICK_HISTORY, "a", encoding="utf-8") as cf:
+                                cf.write(json.dumps({
+                                    "type": "taskbar_or_desktop_launch",
+                                    "icon_click_x": pc["x"], "icon_click_y": pc["y"],
+                                    "by": pc["by"], "switched_to_app": fg_title,
+                                    "switched_to_process": fg_process,
+                                    "delay_s": round(age, 2),
+                                    "at": time.time(),
+                                    "clock": time.strftime("%H:%M:%S"),
+                                }, ensure_ascii=False) + "\n")
+                        except Exception:
+                            pass
+                    pending_explorer_clicks[:] = still_pending
+                elif pending_explorer_clicks:
+                    pending_explorer_clicks[:] = [
+                        pc for pc in pending_explorer_clicks if time.time() - pc["click_ts"] <= 3.0
+                    ]
 
                 now = time.time()
                 with lock:

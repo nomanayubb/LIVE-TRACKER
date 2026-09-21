@@ -295,6 +295,18 @@ Verified before integrating: an isolated 15-second test caught 4 of 5 rapid synt
 
 **The lesson, stated plainly: prefer a slower fix that can only degrade gracefully over a faster one that can fail catastrophically.** A polling gap loses data. A misbehaving system-wide hook can take over someone's mouse. Those are not the same category of risk, even though the hook looked like the more "correct" engineering solution on paper.
 
+### 8e. Taskbar/desktop icon clicks: identifying WHICH app was launched, not just "explorer.exe"
+
+Both the taskbar and the desktop are literally owned by `explorer.exe`, so a click launching or switching to an app via either one is correctly attributed to `explorer.exe` at the moment of the click - accurate, but useless for "which app did they mean to open." Since such a click reliably causes a different app to become foreground shortly after, `dual_tracker.py` now tracks every `explorer.exe`-attributed click and, if a different app becomes foreground within 3 seconds, writes a follow-up `.tracker_click_history.jsonl` line:
+
+```json
+{"type": "taskbar_or_desktop_launch", "icon_click_x": 900, "icon_click_y": 1050,
+ "by": "user", "switched_to_app": "Notepad", "switched_to_process": "notepad.exe",
+ "delay_s": 0.15, "at": ..., "clock": "19:26:08"}
+```
+
+**This is a best-effort heuristic, not a guarantee** - verified directly: in a fast-changing environment, if more than one foreground change happens within that 3-second window, it links to whichever comes *first*, which can be a transient/incidental window rather than the one actually launched. A test run linked a taskbar click to "Tongbu Assistant" (some other window that briefly flashed foreground) instead of the Notepad window actually being switched to. Treat `switched_to_app` as "probably this, especially if `delay_s` is small," not as certain.
+
 ### 8d. A click's `app_title` can show "Untitled" or the wrong app - usually correct, not a bug
 
 `window_at_point()` uses `WindowFromPoint` + `GetAncestor(GA_ROOT)`, which answers "what window is truly topmost at this exact pixel" - genuine Windows Z-order truth, not a guess. Two things follow from that:
