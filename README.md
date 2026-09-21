@@ -313,6 +313,27 @@ c.run_steps([...])                 # multiple dependent actions, ONE process
 
 `run_steps()` is how a multi-action sequence (e.g. open a menu, click an item in it) should always be driven — splitting it across separate script invocations is what caused nearly every automation failure this project has hit.
 
+**Trackpad-gesture equivalents** (added for non-mouse-wheel-native interactions like pinch-zoom and two/one-finger swipes). Windows has no simple "inject a two-finger touch gesture" primitive — these reach apps as wheel events with modifier keys held, which is also how apps that genuinely support trackpad gestures receive them:
+
+```python
+c.zoom(-10)                          # pinch zoom out: Ctrl+wheel
+c.zoom(10, modifiers=["shift"])      # zoom with an extra modifier held too
+c.swipe("up")   ; c.swipe("down")    # two-finger vertical swipe = scroll()
+c.swipe("left") ; c.swipe("right")   # two-finger horizontal swipe
+c.scroll(-5, modifiers=["ctrl"])     # any custom wheel+modifier combo directly
+c.hotkey("ctrl", "shift", "k")       # any N-key chord, not just 2-key
+c.rotate()                           # raises NotImplementedError - see below
+```
+
+Verified against real apps, not assumed:
+- `zoom()` confirmed on Windows File Explorer's Ctrl+Scroll icon-resize (pixel delta 2.66 — icons visibly grew).
+- `swipe("left"/"right")` tries `MOUSEEVENTF_HWHEEL` first, then **automatically falls back to Shift+vertical-wheel** if that produced no change — tested because raw horizontal wheel did nothing in File Explorer (delta 0.48) while Shift+wheel genuinely scrolled it (delta 2.27). Shift+wheel is the older, far more universally supported horizontal-scroll convention on Windows; most standard list/tree controls never opted into the newer horizontal-wheel message.
+- `hotkey()` already supported any number of keys via `*keys` — verified with both a 2-key (Ctrl+Z) and 3-key (Ctrl+Shift+Z) combo on a real app.
+- `rotate()` (two-finger rotate) is deliberately **not implemented** — it raises rather than faking it. No wheel/keyboard convention reaches most apps for rotation; the few apps that do support it (some CAD/image viewers) need Windows' Touch Injection API (`InitializeTouchInjection`/`InjectTouchInput`), a much larger addition than a wheel event. If a specific app needs this, check for a dedicated rotate hotkey first and use `hotkey()`.
+- **Blender doesn't use the Ctrl+Scroll zoom convention** — it zooms on plain scroll instead (confirmed: plain `scroll()` moved its viewport, delta 2.86; `zoom()`'s Ctrl+wheel did nothing there). That's Blender's own binding choice, not a flaw in `zoom()` — the method itself is proven to work via the File Explorer test above.
+
+None of `clicker.py` is Blender-specific — Blender and File Explorer were just convenient already-open test targets, the same role Notepad played for the drag/scroll/CapsLock testing earlier. `Clicker(window_title)` takes any window title substring.
+
 ### 11. `replay.py` — turn recorded history into images/video, for a human, fast
 
 Claude never needs this — it reads OCR/vision data directly. This exists so a *person* can see what happened without staring at raw JSON. Measured: 90 images/sec from logged frame data, contact sheet of 50 frames in 0.08s, data→video conversion at 237 frames/sec (no capture involved, just encoding stored grids).
