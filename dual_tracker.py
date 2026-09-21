@@ -19,10 +19,17 @@ import threading
 from pathlib import Path
 from collections import deque
 
+ctypes.windll.user32.SetProcessDPIAware()  # must run before any window/coord queries -
+# without this, pyautogui's coordinate space can silently disagree with ctypes/mss's
+# physical-pixel space by the display's DPI scale factor (e.g. asking to click (500,500)
+# lands at (450,461) instead). Any script that clicks via pyautogui needs this too.
+
 import mss
 import cv2
 import numpy as np
 import pygetwindow as gw
+
+import claude_activity as ca
 
 BASE_DIR = Path(__file__).resolve().parent  # everything lives inside this project folder, not scattered in home dir
 OUTPUT_FILE = BASE_DIR / ".live_screen_state.txt"
@@ -32,6 +39,9 @@ WINDOW_CONFIG = BASE_DIR / ".tracker_window_config.txt"
 REFRESH_SIGNAL = BASE_DIR / ".tracker_refresh"
 SNAPSHOT_DIR = BASE_DIR / "tracker_snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
+PAUSE_SWITCH = BASE_DIR / ".tracker_paused"          # create this file to instantly pause all capture/reporting
+DENIED_WINDOWS_FILE = BASE_DIR / ".tracker_denied_windows.txt"  # one window-title substring per line = never reported
+STATS_FILE = BASE_DIR / ".tracker_stats.json"
 MAX_SNAPSHOTS = 20
 GRID_COLS, GRID_ROWS = 16, 9  # pixel-grid matrix resolution
 
@@ -48,6 +58,10 @@ shared = {
     "ocr_boxes": [],
     "ocr_ts": 0.0,
     "new_text_tokens": [],
+    "ocr_pass_count": 0,
+    "vision": {},            # structural scan results (rectangles, text regions, layout...)
+    "vision_ts": 0.0,
+    "vision_pass_count": 0,
     "stop": False,
 }
 
@@ -59,6 +73,56 @@ def get_cursor_pos():
     p = POINT()
     user32.GetCursorPos(ctypes.byref(p))
     return p.x, p.y
+
+VK_LBUTTON, VK_RBUTTON = 0x01, 0x02
+
+def mouse_buttons_down():
+    """Polls real button state via GetAsyncKeyState - works for any click,
+    real or synthetic (pyautogui), since both set the same OS-level key state."""
+    left = bool(user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+    right = bool(user32.GetAsyncKeyState(VK_RBUTTON) & 0x8000)
+    return left, right
+
+def window_at_point(x, y):
+    """Which window/app is actually under this screen coordinate, and is it
+    the foreground one or a background window? Answers 'the click landed in
+    WHICH app' rather than just 'a click happened somewhere'."""
+    try:
+        hwnd = user32.WindowFromPoint(ctypes.wintypes.POINT(x, y)) if hasattr(ctypes, "wintypes") else None
+    except Exception:
+        hwnd = None
+    if not hwnd:
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        try:
+            hwnd = user32.WindowFromPoint(POINT(x, y))
+        except Exception:
+            return {"title": "Unknown", "process": "Unknown", "pid": 0, "layer": "unknown"}
+    try:
+        # walk up to the top-level owner window so we get "Blender", not an inner child control
+        GA_ROOT = 2
+        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+        length = user32.GetWindowTextLengthW(root_hwnd)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(root_hwnd, buf, length + 1)
+        title = buf.value or "Untitled"
+        proc, pid = get_process_name_for_hwnd(root_hwnd)
+        fg_hwnd = user32.GetForegroundWindow()
+        layer = "foreground" if root_hwnd == fg_hwnd else "background"
+        return {"title": title, "process": proc, "pid": pid, "layer": layer}
+    except Exception:
+        return {"title": "Unknown", "process": "Unknown", "pid": 0, "layer": "unknown"}
+
+def attribute_click(x, y):
+    """A real click was just detected at (x,y) - check if Claude logged a
+    click near this position/time to attribute it, else it's the user's.
+    Tolerance is wide (80px) because even with SetProcessDPIAware() there's
+    a residual DPI-virtualization rounding gap between processes on this
+    display - not worth chasing pixel-perfect alignment for attribution."""
+    for ts, cx, cy, button in ca.get_recent_clicks(max_age=1.5):
+        if abs(cx - x) < 80 and abs(cy - y) < 80:
+            return "claude", round(time.time() - ts, 2)
+    return "user", None
 
 def get_idle_seconds():
     class LASTINPUTINFO(ctypes.Structure):
@@ -176,6 +240,47 @@ def init_easyocr():
 
 # ---------------- OCR thread (slow, ~150-300ms per pass, never blocks fast loop) ----------------
 
+def vision_worker():
+    """Third parallel loop: structural screen understanding WITHOUT OCR.
+    Benchmarked at ~40-90ms per full scan, so it gets its own thread rather
+    than blocking the ~15ms pixel loop - same reasoning as the OCR thread.
+    Finds rectangles (buttons/panels), text regions (where text is, without
+    reading it), lines, corners, layout dividers, and change grids."""
+    import vision
+    heavy_counter = 0
+    # Rate limit: running this flat-out starved the fast loop (measured: fast
+    # loop degraded 15ms -> 175ms and OCR fell 17s behind, because CPU-bound
+    # OpenCV work competes for cores/GIL). Structural layout doesn't change
+    # 20x/second, so ~4 scans/sec is plenty and leaves the other loops room.
+    TARGET_INTERVAL = 0.25
+    while not shared["stop"]:
+        cycle_start = time.time()
+        if PAUSE_SWITCH.exists():
+            time.sleep(0.3)
+            continue
+        with lock:
+            frame = shared["frame"]
+            frame_ts = shared["frame_ts"]
+        if frame is None:
+            time.sleep(0.05)
+            continue
+        try:
+            heavy_counter += 1
+            prev = getattr(vision_worker, "_prev_gray", None)
+            gray = cv2.cvtColor(frame[:, :, :3].astype(np.uint8), cv2.COLOR_BGR2GRAY)
+            result = vision.scan_all(frame, prev_gray=prev,
+                                     heavy=(heavy_counter % 10 == 0))  # deep pass occasionally
+            vision_worker._prev_gray = gray
+            with lock:
+                shared["vision"] = result
+                shared["vision_ts"] = frame_ts
+                shared["vision_pass_count"] += 1
+        except Exception as e:
+            with lock:
+                shared["vision"] = {"error": str(e)}
+        # yield the CPU back to the fast/OCR loops for the rest of the interval
+        time.sleep(max(0.02, TARGET_INTERVAL - (time.time() - cycle_start)))
+
 def ocr_worker():
     reader = init_easyocr()
     last_tokens = set()
@@ -207,9 +312,11 @@ def ocr_worker():
                 shared["ocr_boxes"] = boxes
                 shared["ocr_ts"] = frame_ts
                 shared["new_text_tokens"] = new_tokens
+                shared["ocr_pass_count"] += 1
         except Exception as e:
             with lock:
                 shared["ocr_text"] = f"OCR error: {e}"
+        time.sleep(0.05)  # brief yield so the fast pixel loop isn't starved of CPU
 
 # ---------------- fast pixel-capture thread (~30-50ms target) ----------------
 
@@ -222,18 +329,61 @@ def fast_worker(target_window_name):
     frame_times = deque(maxlen=60)
     iteration = 0
     last_snapshot_time = 0
+    prev_left_down = False
+    last_click_info = None
+    # Pixel capture (mss.grab ~33ms + cvtColor ~12ms) runs on this slower cadence;
+    # the input/window signals below it run every tick at sub-millisecond cost.
+    PIXEL_INTERVAL = 0.05
+    last_pixel_time = 0.0
+    cached_pixels = None
+    session_start = time.time()
+    stats = {"started_at": session_start, "total_iterations": 0, "ocr_passes": 0,
+              "clicks_detected": 0, "claude_clicks": 0, "user_clicks": 0,
+              "denied_window_blocks": 0, "paused_ticks": 0}
+    was_paused = False
 
     with mss.mss() as sct:
         monitor_count = len(sct.monitors) - 1
         while not shared["stop"]:
             loop_start = time.time()
             try:
+                # PAUSE SWITCH: if this file exists, blank out everything immediately -
+                # process stays alive (so removing the file resumes instantly), but no
+                # real screen content, mouse position, or text is captured or reported.
+                if PAUSE_SWITCH.exists():
+                    was_paused = True
+                    stats["paused_ticks"] += 1
+                    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                        f.write(f"STATUS: PAUSED BY USER\nTIMESTAMP: {time.time()}\n"
+                                f"All capture and reporting halted. Delete {PAUSE_SWITCH.name} to resume.\n")
+                    with open(JSON_FILE, "w", encoding="utf-8") as jf:
+                        json.dump({"status": "PAUSED", "timestamp": time.time()}, jf)
+                    with lock:
+                        shared["frame"] = None
+                    if iteration % 20 == 0:
+                        with open(STATS_FILE, "w", encoding="utf-8") as sf:
+                            json.dump(stats, sf)
+                    time.sleep(0.2)
+                    continue
+                if was_paused:
+                    print("Resumed from pause.")
+                    was_paused = False
+
                 iteration += 1
+                now_input = time.time()
+                stats["total_iterations"] = iteration
                 try:
                     if WINDOW_CONFIG.exists():
                         new_target = WINDOW_CONFIG.read_text(encoding='utf-8').strip()
                         if new_target and new_target != current_target:
                             current_target = new_target
+                except Exception:
+                    pass
+
+                denied_windows = []
+                try:
+                    if DENIED_WINDOWS_FILE.exists():
+                        denied_windows = [l.strip() for l in DENIED_WINDOWS_FILE.read_text(encoding='utf-8').splitlines() if l.strip()]
                 except Exception:
                     pass
 
@@ -270,7 +420,10 @@ def fast_worker(target_window_name):
                 target_window = None
                 target_alive = False
                 win_state = "normal"
-                if current_target:
+                access_denied = any(d.lower() in (current_target or "").lower() for d in denied_windows)
+                if access_denied:
+                    stats["denied_window_blocks"] += 1
+                if current_target and not access_denied:
                     matching = [w for w in all_windows if current_target in w.title]
                     if matching:
                         target_window = matching[0]
@@ -289,23 +442,76 @@ def fast_worker(target_window_name):
                         if target_window.isMinimized: win_state = "minimized"
                         elif target_window.isMaximized: win_state = "maximized"
 
+                if access_denied:
+                    # Explicit denial - do NOT fall back to full-screen capture (that would
+                    # leak the denied window's content anyway if it's on screen). Skip
+                    # capture entirely and report the denial plainly.
+                    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                        f.write(f"STATUS: ACCESS DENIED BY USER\nTARGET_WINDOW: {current_target}\n"
+                                f"TIMESTAMP: {time.time()}\nRemove its entry from {DENIED_WINDOWS_FILE.name} to restore access.\n")
+                    with open(JSON_FILE, "w", encoding="utf-8") as jf:
+                        json.dump({"status": "ACCESS_DENIED", "target_window": current_target, "timestamp": time.time()}, jf)
+                    time.sleep(0.1)
+                    continue
+
                 monitor = sct.monitors[1]
                 if target_window:
                     monitor = {'top': max(0, target_window.top), 'left': max(0, target_window.left),
                                'width': max(100, target_window.width), 'height': max(100, target_window.height)}
 
-                sct_img = sct.grab(monitor)
-                img = np.array(sct_img)
-                gray = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2GRAY)
-                b = int(np.mean(gray))
-                change_pct, change_bbox = change_region(prev_gray, gray)
-                prev_gray = gray
+                # Pixel capture is the expensive part - measured mss.grab at ~33ms and
+                # full-res cvtColor at ~12ms, vs <1ms for every non-pixel signal
+                # (mouse/window/process/clicks). So pixel work runs on its own slower
+                # cadence while the input/window signals stay truly millisecond-fresh.
+                do_pixels = (now_input - last_pixel_time) >= PIXEL_INTERVAL
+                if do_pixels:
+                    last_pixel_time = now_input
+                    sct_img = sct.grab(monitor)
+                    img = np.array(sct_img)
+                    # grayscale on a downscaled copy - 12ms full-res vs ~1ms small,
+                    # and nothing downstream here needs full-res grey
+                    small_bgr = cv2.resize(img[:, :, :3], (0, 0), fx=0.4, fy=0.4,
+                                           interpolation=cv2.INTER_AREA)
+                    gray = cv2.cvtColor(small_bgr, cv2.COLOR_RGB2GRAY)
+                    b = int(np.mean(gray))
+                    change_pct, change_bbox = change_region(prev_gray, gray)
+                    if change_bbox:  # scale bbox back to true screen coordinates
+                        change_bbox = tuple(int(v / 0.4) for v in change_bbox)
+                    prev_gray = gray
+                    cached_pixels = (img, b, change_pct, change_bbox)
+                elif cached_pixels is not None:
+                    img, b, change_pct, change_bbox = cached_pixels
+                else:
+                    time.sleep(0.005)
+                    continue
                 dom_color = dominant_color(img)
                 grid = pixel_grid_matrix(img)
                 blob_count, blob_center = detect_selection_outline(img)
                 mouse_x, mouse_y = get_cursor_pos()
                 idle_s = get_idle_seconds()
                 clipboard = get_clipboard_text()
+                claude_activity = ca.get_activity()
+
+                left_down, _right_down = mouse_buttons_down()
+                if left_down and not prev_left_down:
+                    source, claude_delay = attribute_click(mouse_x, mouse_y)
+                    target_app = window_at_point(mouse_x, mouse_y)
+                    last_click_info = {
+                        "x": mouse_x, "y": mouse_y,
+                        "by": source,                      # "claude" or "user"
+                        "claude_delay_s": claude_delay,
+                        "app_title": target_app["title"],  # WHICH app was clicked
+                        "app_process": target_app["process"],
+                        "app_pid": target_app["pid"],
+                        "app_layer": target_app["layer"],  # foreground or background window
+                        "at": time.time(),
+                    }
+                    stats["clicks_detected"] += 1
+                    stats[f"{source}_clicks"] += 1
+                    per_app = stats.setdefault("clicks_per_app", {})
+                    key = f"{target_app['title'][:30]} [{source}]"
+                    per_app[key] = per_app.get(key, 0) + 1
+                prev_left_down = left_down
 
                 now = time.time()
                 with lock:
@@ -315,6 +521,8 @@ def fast_worker(target_window_name):
                     ocr_boxes = shared["ocr_boxes"]
                     ocr_ts = shared["ocr_ts"]
                     new_text_tokens = shared["new_text_tokens"]
+                    vision_result = shared["vision"]
+                    vision_ts = shared["vision_ts"]
 
                 if now - last_snapshot_time > 3:
                     try:
@@ -324,6 +532,16 @@ def fast_worker(target_window_name):
                         existing = sorted(SNAPSHOT_DIR.glob("snap_*.png"))
                         while len(existing) > MAX_SNAPSHOTS:
                             existing.pop(0).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+                if iteration % 20 == 0:
+                    with lock:
+                        stats["ocr_passes"] = shared["ocr_pass_count"]
+                    stats["uptime_seconds"] = round(time.time() - session_start, 1)
+                    try:
+                        with open(STATS_FILE, "w", encoding="utf-8") as sf:
+                            json.dump(stats, sf)
                     except Exception:
                         pass
 
@@ -345,7 +563,13 @@ def fast_worker(target_window_name):
                     "selection_blob_count": blob_count, "selection_blob_center": blob_center,
                     "pixel_grid": grid, "grid_cols": GRID_COLS, "grid_rows": GRID_ROWS,
                     "text_data": ocr_text, "ocr_boxes": ocr_boxes, "ocr_age_ms": ocr_age_ms,
-                    "new_text_tokens": new_text_tokens, "clipboard": clipboard, "status": "Running"
+                    "new_text_tokens": new_text_tokens, "clipboard": clipboard,
+                    "claude_active": claude_activity["active"], "claude_window": claude_activity["window"],
+                    "claude_action": claude_activity["action"], "claude_private": claude_activity["private"],
+                    "last_click": last_click_info,
+                    "vision": vision_result,
+                    "vision_age_ms": round((now - vision_ts) * 1000, 0) if vision_ts else -1,
+                    "status": "Running"
                 }
                 with open(JSON_FILE, "w", encoding="utf-8") as jf:
                     json.dump(data, jf, ensure_ascii=False)
@@ -375,6 +599,19 @@ PIXEL_GRID_{GRID_COLS}x{GRID_ROWS}: see JSON file for full matrix
 OCR_AGE_MS: {ocr_age_ms}
 NEW_TEXT: {new_text_tokens[:10]}
 CLIPBOARD: {clipboard[:80]}
+CLAUDE_ACTIVE: {claude_activity['active']}
+CLAUDE_WINDOW: {claude_activity['window']}
+CLAUDE_ACTION: {claude_activity['action']}
+CLAUDE_PRIVATE: {claude_activity['private']}
+LAST_CLICK: {last_click_info}
+VISION_AGE_MS: {round((now - vision_ts) * 1000, 0) if vision_ts else -1}
+VISION_RECTANGLES: {len(vision_result.get('rectangles', []))} clickable rects found
+VISION_TEXT_REGIONS: {len(vision_result.get('text_regions', []))} text areas located (not read)
+VISION_LINES: {len(vision_result.get('lines', []))}  CORNERS: {len(vision_result.get('corners', []))}
+VISION_LAYOUT: {vision_result.get('layout', {})}
+VISION_EDGE_DENSITY: {vision_result.get('edges', {}).get('total_edge_density_pct', '-')}%
+VISION_CHANGED_CELLS: {len(vision_result.get('region_change', {}).get('changed_cells', []))}
+VISION_PHASH: {vision_result.get('phash', '-')[:32]}
 TEXT_DATA: {ocr_text}
 STATUS: Running
 """
@@ -395,6 +632,9 @@ if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else None
     ocr_thread = threading.Thread(target=ocr_worker, daemon=True)
     ocr_thread.start()
+    vision_thread = threading.Thread(target=vision_worker, daemon=True)
+    vision_thread.start()
+    print("Threads: fast pixel loop (~15ms) | vision scan (~40-90ms) | OCR (~150-300ms)")
     try:
         fast_worker(target)
     except KeyboardInterrupt:

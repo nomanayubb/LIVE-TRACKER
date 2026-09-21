@@ -25,9 +25,16 @@ If a script mentioned here no longer matches reality, fix the mismatch immediate
 
 ### 1. `dual_tracker.py` — the tracker to run (supersedes `live_tracker.py`, `universal_tracker.py`, `full_tracker.py`)
 
-Two threads running in parallel:
-- **Fast pixel loop** (~15-20ms/frame): mouse position, idle time, real foreground window (`ACTUAL_FOREGROUND`), process name+PID, window list, brightness, dominant color, a genuine **16×9 pixel-grid matrix** (real per-cell RGB color, not just one brightness number), frame-change % **and bounding box** (where on screen changed), orange-selection-outline detection (Blender-style), clipboard content.
-- **Slow OCR thread** (~150-300ms, EasyOCR on CPU — this is a hard floor, cannot go faster on this machine): reads on-screen text with bounding boxes. Runs independently, never blocks the fast loop. The merged output always includes `OCR_AGE_MS` so you know exactly how stale the text portion is relative to the pixel portion.
+**Four cadences, each running at its natural cost** — this split is the whole reason it's fast, and was arrived at by profiling, not guessing:
+
+| Loop | Cadence | What it does | Why this cadence |
+|---|---|---|---|
+| Input/window | **~7.5ms** | mouse position, real clicks + attribution, foreground window, process+PID, idle time, window list | all sub-millisecond `ctypes`/`pygetwindow` calls — no screen capture needed |
+| Pixel | ~50ms | brightness, 16×9 RGB pixel-grid matrix, change % + bounding box, selection-outline detection | `mss.grab` measured at **33ms** and full-res `cvtColor` at **12ms** — unavoidable, so it gets its own cadence instead of blocking everything |
+| Vision | ~250ms | full structural scan via `vision.py` (rectangles, text regions, lines, corners, layout) | measured 40-90ms per scan; running it flat-out starved the other loops (fast loop degraded 15ms→175ms, OCR fell 23s behind) |
+| OCR | ~150-300ms+ | EasyOCR text reading with bounding boxes | hard CPU floor on this machine (no CUDA/MPS) |
+
+Every output carries its own freshness label (`OCR_AGE_MS`, `VISION_AGE_MS`) so you always know how stale each portion is relative to the millisecond-fresh input data. Nothing ever blocks the fast loop.
 
 **Run it:**
 ```bash
@@ -59,7 +66,37 @@ nohup python overlay.py > overlay.log 2>&1 &
 ```
 Click-and-drag anywhere on the overlay to reposition it.
 
-### 3. Verified click-automation pattern (see `click_cat.py` for the reference implementation)
+### 3. `vision.py` — structural screen understanding WITHOUT OCR
+
+OCR reads *text* and costs 150-300ms. But most of a screen is *structure* — buttons, panels, icons, borders, highlights — which OpenCV detects geometrically far cheaper. This module answers "where are the clickable things, what shape are they, what changed, what's the layout?" rather than "what does that text say?".
+
+Provides: `edge_profile`, `detect_rectangles` (buttons/panels), `detect_text_regions` (finds WHERE text is without reading it — use it to pick which small region deserves a real OCR pass), `detect_lines`, `detect_circles`, `detect_corners`, `color_regions`, `find_color` (any colour, any app's highlight), `dominant_palette`, `match_template` (find a known icon anywhere on screen — the key to app-agnostic automation), `perceptual_hash` + `hamming_distance` (cheap "did anything actually change?"), `motion_vectors` (optical flow — direction/speed of scrolling/dragging), `region_change_grid` (which grid cells changed), `detect_blinking` (carets, spinners), `layout_analysis` (panel dividers), and `scan_all` which runs the whole set efficiently.
+
+Run `python vision.py` to re-run the built-in benchmark on your current screen.
+
+**Measured costs (1920×1080, avg of 5):** individual detectors 15-32ms each; `scan_all(fast)` ~90ms; `scan_all(fast, scale=0.25)` ~42ms; `scan_all(heavy)` ~177ms. Downscaling is the main speed lever — `scan_all` deliberately resizes **once** and shares that frame with every detector, because benchmarking showed each detector resizing independently cost more than it saved.
+
+### 4. `claude_activity.py` — activity declaration + click attribution
+
+Any automation script imports this to declare what it's doing, so the tracker/admin panel can show "Claude: clicking in Blender > Add menu" instead of just "something happened":
+```python
+import claude_activity as ca
+ca.set_activity(True, window="Blender", action="Clicking Add menu")
+ca.log_click(319, 69)      # log before clicking, so the click can be attributed
+pyautogui.click(319, 69)
+ca.set_activity(False)
+```
+The tracker detects every real mouse click (via `GetAsyncKeyState` polling), then reports **who did it and where it landed**: `by` (claude/user), `app_title`, `app_process`, `app_pid`, and `app_layer` (foreground vs background window).
+
+### 5. `admin_panel.py` — the user's control surface
+
+A GUI dashboard (run `python admin_panel.py`) showing live: whether Claude is currently operating and in which window/action, what access it currently has, full capture statistics (frames, OCR scans, clicks broken down by Claude vs you), and per-window access checkboxes.
+
+**STOP is a real kill switch** — it creates `.tracker_paused`, and the tracker blanks out *all* capture and reporting within ~200ms (writes only a "PAUSED" marker, captures nothing, shares no frames). The process stays alive so START resumes instantly. While paused, Claude receives no screen data whatsoever.
+
+Per-window blocking writes to `.tracker_denied_windows.txt`; a denied window is skipped entirely rather than falling back to a full-screen grab (which would leak its contents anyway).
+
+### 6. Verified click-automation pattern (see `click_cat.py` for the reference implementation)
 
 **The one rule that matters:** always re-verify focus (via brightness check or `ACTUAL_FOREGROUND`) **immediately before every single click/keystroke, inside the same script run.** Never split "activate window" and "click" across two separate script invocations — focus reverts to whatever invoked the script (the terminal) the instant a script exits, so a second script starting later can't assume the target is still focused. This was the root cause of nearly every failed automation attempt this session.
 
@@ -84,6 +121,7 @@ Click-and-drag anywhere on the overlay to reposition it.
 ## Known environment constraints (don't relitigate these — they're settled)
 
 - **No internet access** in this environment. `pywin32` and `psutil` could not be installed via pip. All "process name", "idle time", "cursor position" features are built with raw `ctypes` calls to `user32`/`kernel32` directly instead (see the top of `dual_tracker.py`).
+- **DPI-awareness coordinate mismatch (important — call `ctypes.windll.user32.SetProcessDPIAware()` at the very top of ANY script that uses `pyautogui` to click, before importing pyautogui).** Without it, pyautogui's coordinate space silently disagrees with `ctypes`/`mss`'s physical-pixel space by the display's DPI scale factor — e.g. asking to click `(500,500)` actually lands at `(450,461)`. This was discovered while building click-attribution and likely explains some of the click-accuracy problems during the earlier Blender rigging automation attempts. `dual_tracker.py` already has this fix; any Blender-automation script must add it too.
 - **EasyOCR on this CPU has no CUDA/MPS** — a single OCR pass takes ~150-300ms. This is a hard floor; the dual-loop architecture works around it rather than fighting it.
 - **`killall python` does not work** in this Git Bash environment. Use `taskkill //F //IM python.exe` instead (note the double-slash for Git Bash).
 - **Blender's window repeatedly gets minimized** between sessions/turns (pygetwindow reports it parked at `-25600,-25600`). Always check `TARGET_STATE`/`isMinimized` before trusting a capture, and restore with `.minimize(); .restore()` if needed.

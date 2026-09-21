@@ -28,4 +28,10 @@ legacy_state/
 .tracker_history.log
 .tracker_window_config.txt
 .tracker_refresh
+.tracker_paused
+.tracker_stats.json
+.tracker_denied_windows.txt
+.claude_activity.json
+.claude_click_log.txt
+.bench_tmp.*
 tracker_snapshots/
