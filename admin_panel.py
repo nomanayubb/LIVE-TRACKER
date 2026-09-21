@@ -12,6 +12,16 @@ resumes instantly). While paused, Claude receives no screen data at all.
 
 Run:  python admin_panel.py
 """
+import ctypes
+ctypes.windll.user32.SetProcessDPIAware()  # must precede any window/coordinate
+# handling - without it, Windows applies DPI virtualization to this tkinter
+# window, which can desync where a screenshot shows content from where mouse
+# input actually gets delivered. Verified: synthetic scroll input landed
+# somewhere that never reached the canvas's <MouseWheel> binding (confirmed
+# with a debug print that never fired), despite the same screen region
+# clearly showing the right content in a screenshot. Same fix already
+# applied in dual_tracker.py and clicker.py for the same class of bug.
+
 import json
 import tkinter as tk
 from tkinter import ttk
@@ -33,7 +43,11 @@ WARN = "#f85149"
 
 root = tk.Tk()
 root.title("Tracker Admin Panel")
-root.geometry("760x680")
+# Widened from 760 after adding SetProcessDPIAware(): at true native size the
+# header (status label + Settings + Precision + STOP) needs more room than
+# the old width gave it - previously that was hidden because Windows was
+# uniformly shrinking the whole window, so it fit by accident.
+root.geometry("900x680")
 root.configure(bg=BG)
 
 def read_json(path, default=None):
@@ -160,8 +174,13 @@ def open_settings():
     # it. lift()+focus_force() ensures it's genuinely on top and interactive.
     win.lift()
     win.focus_force()
+    # Stays topmost for its whole lifetime, not just a few seconds after
+    # opening. This is a reference dialog meant to be read while switching
+    # back to the app it's explaining - a short timer meant it silently lost
+    # to whatever else next became foreground (confirmed with GetCursorPos:
+    # the coordinates were exactly right, but another window had reclaimed
+    # that screen position once the timer expired).
     win.attributes("-topmost", True)
-    win.after(4000, lambda: win.attributes("-topmost", False))
 
     nb = ttk.Style()
     nb.theme_use("default")
@@ -172,19 +191,42 @@ def open_settings():
     tabs = ttk.Notebook(win)
     tabs.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # --- Modes tab ---
+    # --- Modes tab (scrollable - the "contains" breakdown makes each box tall
+    # enough that all 6 profiles no longer fit in the visible area at once) ---
     modes_tab = tk.Frame(tabs, bg=BG)
     tabs.add(modes_tab, text="Modes")
+    modes_canvas = tk.Canvas(modes_tab, bg=BG, highlightthickness=0)
+    modes_scroll = ttk.Scrollbar(modes_tab, orient="vertical", command=modes_canvas.yview)
+    modes_inner = tk.Frame(modes_canvas, bg=BG)
+    modes_inner.bind("<Configure>", lambda e: modes_canvas.configure(scrollregion=modes_canvas.bbox("all")))
+    modes_canvas.create_window((0, 0), window=modes_inner, anchor="nw")
+    modes_canvas.configure(yscrollcommand=modes_scroll.set)
+    modes_canvas.pack(side="left", fill="both", expand=True)
+    modes_scroll.pack(side="right", fill="y")
+    # A Canvas does not respond to the scroll wheel on its own - only to
+    # dragging the scrollbar thumb - unless <MouseWheel> is bound explicitly.
+    # Verified: sending a wheel event with nothing bound produced zero
+    # movement. Windows reports wheel delta in multiples of 120. Bound to
+    # the canvas itself (not bind_all) so it doesn't hijack scrolling
+    # anywhere else in the app, including the main window behind it.
+    def _modes_wheel(e):
+        print(f"[wheel] fired, delta={e.delta}", flush=True)
+        modes_canvas.yview_scroll(int(-e.delta / 120), "units")
+    modes_canvas.bind("<MouseWheel>", _modes_wheel)
+    modes_inner.bind("<MouseWheel>", _modes_wheel)
+
     if _modes:
         for name, p in _modes.PROFILES.items():
-            box = tk.LabelFrame(modes_tab, text=f" {name} ", bg=BG, fg=ACCENT,
+            box = tk.LabelFrame(modes_inner, text=f" {name} ", bg=BG, fg=ACCENT,
                                 font=("Segoe UI", 10, "bold"), bd=1, relief="solid")
             box.pack(fill="x", padx=8, pady=4)
             on = [k.upper() for k, v in p["switches"].items() if v] or ["-"]
             off = [k for k, v in p["switches"].items() if not v] or ["-"]
+            contains_text = "\n".join(f"  • {c}" for c in p.get("contains", []))
             text = (f"{p['summary']}\n"
                     f"ON: {', '.join(on)}   OFF: {', '.join(off)}\n"
-                    f"speed: {p['performance']}")
+                    f"speed: {p['performance']}\n"
+                    f"contains:\n{contains_text}")
             tk.Label(box, text=text, justify="left", anchor="w", bg=BG, fg=FG,
                     font=("Consolas", 9), padx=8, pady=4, wraplength=760).pack(fill="x")
 
@@ -294,6 +336,10 @@ win_inner = tk.Frame(canvas, bg=BG)
 win_inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 canvas.create_window((0, 0), window=win_inner, anchor="nw")
 canvas.configure(yscrollcommand=scrollbar.set)
+# Same missing-binding bug as the Settings/Modes canvas: a Canvas only
+# scrolls via the scrollbar thumb unless <MouseWheel> is bound explicitly.
+canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+win_inner.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
 canvas.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=6)
 scrollbar.pack(side="right", fill="y")
 

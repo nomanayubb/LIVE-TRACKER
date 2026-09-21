@@ -37,8 +37,15 @@ PROFILES = {
             "leaving running in the background all day",
         ],
         "switches": {"paused": False, "precision": False},
-        "performance": "~3-9ms input loop, 16x9 colour grid, OCR only when the screen changes",
+        "performance": "~15-20ms loop with OCR+vision threads active on a static window (re-measured; the earlier ~3-9ms figure was from an isolated benchmark with those threads idle - not realistic ongoing operation). Watch out for a stale .tracker_window_config.txt silently overriding your target: if it still points at an actively-changing window from earlier testing, loop time can balloon to 80-170ms.",
         "cost": "low - safe to leave running indefinitely",
+        "contains": [
+            "16x9 pixel grid (144 cells of real averaged RGB) - rough layout/colour, NOT text-legible",
+            "foreground window, process name, PID, mouse position, idle time, clipboard",
+            "click detection with attribution (you vs Claude, which app, foreground/background)",
+            "OCR runs, but skips entirely when the frame hasn't visually changed - this is what keeps it fast",
+            "no exact-pixel frame saved (exact_frame_png is null) - that only happens in precision mode",
+        ],
     },
 
     # ------------------------------------------------------------------ automation
@@ -50,12 +57,18 @@ PROFILES = {
             "verifying an automation step actually worked",
         ],
         "switches": {"paused": False, "precision": False},
-        "performance": "~3-9ms input loop; vision scan ~250ms gives button/text-region positions; OCR confirms each step",
+        "performance": "~15-16ms loop (re-measured) with real vision.py structural data present; vision scan itself ~250ms cadence, OCR confirms each step",
         "cost": "low",
         "notes": "Precision OFF on purpose - vision.py already locates click targets, "
                  "and OCR text confirms the result. Extra pixel detail adds nothing here "
                  "and only slows the loop. Use clicker.py, and keep dependent steps inside "
                  "ONE run_steps call (focus reverts the moment a script exits).",
+        "contains": [
+            "everything normal mode has, plus:",
+            "full vision.py structural scan every ~250ms (button/panel rectangles, text-region positions, layout dividers)",
+            "OCR text and bounding boxes to confirm a click landed on the right label",
+            "16x9 grid only - precision stays off, since neither solver needs finer pixels",
+        ],
     },
 
     # ------------------------------------------------------------------ reading
@@ -67,11 +80,17 @@ PROFILES = {
             "when OCR keeps mis-reading characters",
         ],
         "switches": {"paused": False, "precision": True},
-        "performance": "~3.4ms loop, 48x27 colour grid, exact-pixel frame written on every change",
+        "performance": "~14-15ms loop (re-measured), 48x27 colour grid, exact-pixel frame written on every change",
         "cost": "moderate - writes an image on each visual change",
         "notes": "The exact frame (.live_frame.jpg) is the sharp, fully readable one. "
                  "The grid is a 1600x compression and will NOT be legible - do not try to "
                  "read text from a reconstructed grid image.",
+        "contains": [
+            "everything normal mode has, plus:",
+            "48x27 pixel grid (1296 cells) instead of 16x9 - still not text-legible, just a better colour/layout summary",
+            "exact_frame_png: a real sharp JPEG (.live_frame.jpg), rewritten only when the frame actually changes",
+            "OCR re-runs on any single-pixel change (32x32 phash, hamming distance 0) instead of a coarser threshold",
+        ],
     },
 
     # ------------------------------------------------------------------ evidence
@@ -83,10 +102,15 @@ PROFILES = {
             "diagnosing a subtle visual difference (colour shifts, faint highlights)",
         ],
         "switches": {"paused": False, "precision": True},
-        "performance": "~3.4ms loop; exact frames + rotating snapshot buffer; replay.py rebuilds 90 images/sec",
+        "performance": "~14-15ms loop (re-measured, same as text_reading); exact frames + rotating snapshot buffer; replay.py rebuilds 90 images/sec",
         "cost": "moderate - disk writes on every visual change",
         "notes": "Pair with replay.py: 'record' to log frames, then 'sheet' for a "
                  "contact sheet of many moments in one image (measured 0.08s for 50).",
+        "contains": [
+            "identical capture to text_reading (48x27 grid + exact frame per change) - same switches, different intent",
+            "meant to be paired with replay.py's frame log and change-history log for a reviewable record",
+            "tracker_snapshots/ keeps a rotating buffer of the last 20 real screenshots regardless of mode",
+        ],
     },
 
     # ------------------------------------------------------------------ motion
@@ -106,6 +130,11 @@ PROFILES = {
                  "per-grab overhead, so full-screen costs 34ms (22fps) while any smaller "
                  "region costs ~18ms (~50fps). Shrinking below 960x540 buys nothing. "
                  "Turn the main tracker's precision OFF so it doesn't compete for CPU.",
+        "contains": [
+            "raw BGR numpy frames from a screen region you specify (RegionCapture), kept in an in-memory ring buffer",
+            "no OCR, no vision scan, no JSON report - this is a separate module from the main tracker on purpose",
+            "motion_mask()/motion_amount() for basic movement detection; all further processing is the caller's own code",
+        ],
     },
 
     # ------------------------------------------------------------------ privacy
@@ -122,6 +151,10 @@ PROFILES = {
         "notes": "This is a real kill switch, not a filter - within ~200ms the tracker "
                  "writes only a PAUSED marker, shares no frames, and runs no OCR or vision. "
                  "Claude receives no screen data while this is active.",
+        "contains": [
+            "status: \"PAUSED\" only - no pixel_grid, no text_data, no vision, no clicks recorded",
+            "the process itself stays alive so flipping back to any other mode resumes instantly",
+        ],
     },
 }
 
@@ -212,6 +245,10 @@ def _print_profile(name, p, active=False):
     print(f"  cost : {p['cost']}")
     for u in p["use_for"]:
         print(f"    - {u}")
+    if p.get("contains"):
+        print(f"  contains:")
+        for c in p["contains"]:
+            print(f"    * {c}")
     if p.get("notes"):
         print(f"  note: {p['notes']}")
 

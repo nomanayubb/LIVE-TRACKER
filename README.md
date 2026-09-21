@@ -10,7 +10,7 @@ A real-time, non-Blender-specific screen-awareness system: it watches whatever w
 
 1. Read this README fully.
 2. Run `python modes.py list` to see every capture profile and `python modes.py show` for what's currently active.
-3. **When the user gives you a task, state which mode it needs before starting** — e.g. *"this is UI automation, so precision should be OFF; expect ~3-9ms loop"*. Use `python modes.py recommend "<their task>"` if unsure.
+3. **When the user gives you a task, state which mode it needs before starting** — e.g. *"this is UI automation, so precision should be OFF; expect ~15ms loop"*. Use `python modes.py recommend "<their task>"` if unsure.
 4. You can set it yourself with `modes.apply("<profile>")`, or tell the user to click that mode's button in the admin panel — whichever they prefer. Say which one you're doing.
 5. If a task needs **sharp, readable frames**, that means `precision` ON — the exact-pixel image lands at `.live_frame.jpg`. Never try to read text from a grid reconstruction; it's a 1600× compression and will not be legible.
 6. Never leave a heavy mode on after the task that needed it is done — switch back to `normal`.
@@ -155,7 +155,7 @@ Normal tracking stays fast. When you need maximum capture detail, toggle **PRECI
 |---|---|---|
 | Pixel grid | 16×9 = 144 cells | **48×27 = 1296 cells** of real averaged RGB |
 | Exact-pixel frame | not written | `.live_frame.jpg` rewritten on every visual change, linked from the JSON as `exact_frame_png` |
-| Measured loop | ~3.0ms | ~3.4ms |
+| Measured loop | ~15-20ms | ~14-15ms |
 
 **On "data that can rebuild the exact screenshot":** a 1920×1080 frame is ~6.2 MB of raw pixels. Encoding all of them into JSON would be *larger and slower* than just writing an image file, so precision mode writes the real image to disk and links it from the report — you get exact original pixels without a separate screenshot step, and without a 6 MB JSON per frame. (An early attempt that PNG-encoded every frame took the loop from 90ms to 188ms; JPEG at q92, written only when the frame actually changes, made it essentially free.)
 
@@ -172,10 +172,10 @@ python modes.py recommend "read a long log"   # pick one from a plain descriptio
 
 | Profile | Precision | Use for | Measured speed |
 |---|---|---|---|
-| `normal` | off | default; general awareness, background use | ~3-9ms loop |
-| `ui_automation` | off | clicking menus/buttons, verifying steps | ~3-9ms; vision ~250ms gives click targets |
-| `text_reading` | **ON** | dense/small text, logs, code | ~3.4ms; sharp frame per change |
-| `evidence` | **ON** | before/after, replay, recording a run | ~3.4ms; replay rebuilds 90 img/sec |
+| `normal` | off | default; general awareness, background use | ~15-20ms loop (re-measured with OCR+vision threads actually active) |
+| `ui_automation` | off | clicking menus/buttons, verifying steps | ~15-16ms; vision ~250ms gives click targets |
+| `text_reading` | **ON** | dense/small text, logs, code | ~14-15ms; sharp frame per change |
+| `evidence` | **ON** | before/after, replay, recording a run | ~14-15ms; replay rebuilds 90 img/sec |
 | `motion_capture` | off | feeding real frames to your own pipeline, high fps | 1280×720 → **47fps**; use `motion.py`, not the tracker |
 | `privacy` | off (paused) | banking, passwords, anything private | no capture at all |
 
@@ -249,6 +249,11 @@ Things that turned out **not** to matter (measured, so don't re-optimize them): 
 - **Tkinter loses clipboard ownership when its root is destroyed.** A test harness that set the clipboard via a short-lived `Tk()` produced perfectly alternating pass/fail results, which looked like a drag bug for several rounds. It wasn't - the drags always worked (confirmed visually: text highlighted, status bar reading "5 of 19 characters"). Read the clipboard through the Win32 API instead.
 - **Undeclared `ctypes` return types segfault on 64-bit Python.** Calling `GetClipboardData`/`GlobalLock` without setting `restype` truncates 64-bit handles to `c_int` and crashes the interpreter outright. Always declare `argtypes`/`restype` for Win32 calls that return handles or pointers.
 - **A focus guard can destroy the thing it's guarding.** The original `focus()` called `minimize(); restore()` every time, which dismissed any open menu - so step 2 of a menu sequence failed after step 1 opened it. It now does nothing at all when the window is already foreground.
+- **A stale `.tracker_window_config.txt` silently overrides your command-line target.** Launching `dual_tracker.py "Notepad"` while an old config file from earlier testing still says `"Claude"` means the tracker quietly tracks Claude instead - `TARGET_WINDOW` in the JSON will show the config file's value, not your argument. This caused a real false alarm: normal mode measured 80-170ms and looked broken, until checking `TARGET_WINDOW` showed it was tracking an actively-changing terminal window (constant OCR re-scans), not the static Notepad window intended. Delete the file or overwrite it before trusting a fresh benchmark.
+- **Tkinter Canvas widgets don't scroll via mouse wheel unless you bind `<MouseWheel>` explicitly** - a scrollbar alone only responds to dragging its thumb. Confirmed the gap with a debug print inside the binding that simply never fired.
+- **`admin_panel.py`/`overlay.py` were missing `SetProcessDPIAware()`** (unlike `dual_tracker.py`/`clicker.py`, which already had it). Without it, screen coordinates as seen by a screenshot and where Windows actually delivers mouse/wheel input to that window can disagree, even though `GetCursorPos` reports the coordinates you asked for - confirmed input landing on a *different* window than the one a screenshot at the same coordinates showed. Both now call it at import time. This also changed the panel's true rendered size, so `admin_panel.py`'s window was widened from 760 to 900px to fit its header again.
+- **A Toplevel dialog can be a real, correctly-registered window and still be invisible in a screenshot** if something else is on top of it - even briefly. A 4-second `-topmost` timer was too short for a reference dialog meant to stay open while switching back to the app it explains; extended to stay topmost for its full lifetime.
+- **Reading `.live_screen_state.json` while the tracker is mid-write races.** The file isn't written atomically, so an occasional `JSONDecodeError` on an empty read is expected under polling - retry rather than treating it as a real error.
 
 ### 9. Verified click-automation pattern (see `click_cat.py` for the reference implementation)
 

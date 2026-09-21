@@ -4,6 +4,11 @@ Always-on-top live overlay showing what the tracker currently sees.
 Runs independently - reads the tracker's output file every 100ms and
 displays it directly on screen. No chat interaction needed at all.
 """
+import ctypes
+ctypes.windll.user32.SetProcessDPIAware()  # same fix as admin_panel.py - without
+# it, dragging this window can desync between where it visually is and where
+# Windows delivers the drag's mouse input.
+
 import tkinter as tk
 from pathlib import Path
 
