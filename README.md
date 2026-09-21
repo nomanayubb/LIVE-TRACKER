@@ -145,14 +145,25 @@ python modes.py recommend "read a long log"   # pick one from a plain descriptio
 | `ui_automation` | off | clicking menus/buttons, verifying steps | ~3-9ms; vision ~250ms gives click targets |
 | `text_reading` | **ON** | dense/small text, logs, code | ~3.4ms; sharp frame per change |
 | `evidence` | **ON** | before/after, replay, recording a run | ~3.4ms; replay rebuilds 90 img/sec |
-| `motion_capture` | off | motion blur, video, high fps | 1280×720 → **47fps**; use `motion.py`, not the tracker |
+| `motion_capture` | off | feeding real frames to your own pipeline, high fps | 1280×720 → **47fps**; use `motion.py`, not the tracker |
 | `privacy` | off (paused) | banking, passwords, anything private | no capture at all |
 
 The admin panel has a one-click button per profile, and highlights the active one.
 
-### 7c. `motion.py` — high-FPS region capture and motion blur
+### 7c. `motion.py` — high-FPS region capture
+
+Gives a downstream pipeline a stream of real consecutive frames from a screen region, as fast as the OS allows, with no screenshot step and no disk round-trip. It hands you raw numpy frames — processing is entirely the caller's business.
 
 Separate from the tracker because it's a different profile entirely: the tracker samples cheaply and slowly (UI changes slowly); this grabs a fixed region as fast as the OS allows and keeps real frames in memory.
+
+```python
+cap = motion.RegionCapture(left=100, top=100, width=1280, height=720).start()
+frame  = cap.latest()          # newest BGR frame
+frames = cap.recent(5)         # last 5 consecutive frames
+moving = cap.motion_mask()     # which pixels changed
+pct    = cap.motion_amount()   # how much of the region is moving
+cap.stop()
+```
 
 **Measured capture ceiling** (mss; DXGI/`dxcam` unavailable offline):
 
@@ -164,11 +175,6 @@ Separate from the tracker because it's a different profile entirely: the tracker
 
 The ~18ms per-grab cost is **fixed overhead, not proportional to pixel count** — so full-screen is what hurts (34ms), and shrinking below 960×540 buys nothing. Capture only the region you need.
 
-Blur modes (measured): `motion_blur` accumulate ~69ms · `directional_blur` ~40ms · `selective_blur` ~120ms.
-
-- **accumulate** — weighted blend of the last N real frames. This is what a physical shutter does (light integrated over the exposure), so moving things smear while static things stay sharp — unlike a filter applied to one still image, which smears everything equally.
-- **directional** — optical flow estimates the dominant motion vector, then blurs along it. Correct when the whole scene moves coherently (a spinning wheel, a pan).
-- **selective** — blurs only the pixels that actually moved, keeping static UI (scoreboards, overlays, text) crisp.
 
 ### 7b. Which mode to use for which task
 

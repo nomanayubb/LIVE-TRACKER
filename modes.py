@@ -91,18 +91,18 @@ PROFILES = {
 
     # ------------------------------------------------------------------ motion
     "motion_capture": {
-        "summary": "High frame-rate capture of a region for motion blur or frame-accurate video work.",
+        "summary": "High frame-rate capture of a screen region, feeding real consecutive frames to a downstream pipeline.",
         "use_for": [
-            "applying motion blur to live video (e.g. a casino stream)",
+            "feeding a live video region into your own processing pipeline",
             "anything needing many real consecutive frames per second",
-            "measuring motion direction/speed in a video region",
+            "measuring how much of a region is moving",
         ],
         "switches": {"paused": False, "precision": False},
-        "performance": "MEASURED capture ceiling: 1920x1080 -> ~22fps | 1280x720 -> ~47fps | 960x540 -> ~56fps. "
-                       "Blur cost: accumulate ~69ms, directional ~40ms, selective ~120ms",
+        "performance": "MEASURED capture ceiling: 1920x1080 -> ~22fps | 1280x720 -> ~47fps | 960x540 -> ~56fps",
         "cost": "high CPU while running - use a region, not full screen",
         "notes": "Use motion.py's RegionCapture directly, NOT the main tracker - it samples "
-                 "too slowly for this. Capture ONLY the video region: mss has a fixed ~18ms "
+                 "too slowly for this. It hands you raw numpy frames; processing is left to "
+                 "the caller. Capture ONLY the region you need: mss has a fixed ~18ms "
                  "per-grab overhead, so full-screen costs 34ms (22fps) while any smaller "
                  "region costs ~18ms (~50fps). Shrinking below 960x540 buys nothing. "
                  "Turn the main tracker's precision OFF so it doesn't compete for CPU.",
