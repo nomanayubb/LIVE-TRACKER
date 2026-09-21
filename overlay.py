@@ -114,7 +114,7 @@ def refresh():
         recent_lines = []
         try:
             lines = CLICK_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines()
-            for line in reversed(lines[-6:]):
+            for line in reversed(lines[-15:]):
                 e = json.loads(line)
                 who = "you" if e["by"] == "user" else "CLAUDE"
                 recent_lines.append(f"  {e.get('clock','')} {who:6s} -> {e['app_title'][:22]}")

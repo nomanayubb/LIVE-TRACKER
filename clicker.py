@@ -199,14 +199,30 @@ class Clicker:
     def click_at(self, x, y, button="left", clicks=1, relative=True, desc=None):
         """Click at a coordinate. relative=True treats (x,y) as offsets inside
         the target window, which is what you almost always want - absolute
-        screen coordinates break the moment the window moves."""
+        screen coordinates break the moment the window moves.
+
+        Uses explicit mouseDown()+sleep+mouseUp() rather than pyautogui.click().
+        Measured directly: pyautogui.click()'s internal down->up gap is too
+        short for GetAsyncKeyState to reliably see, even polled every 1ms in
+        an isolated test with zero other work competing for the CPU (0 of
+        several attempts detected). A manual mouseDown, a real 20ms hold, then
+        mouseUp was reliably detected every time in the same test. The click
+        still registers identically to any app - a genuine hardware click
+        also has a nonzero hold duration - this just guarantees one instead
+        of leaving it to whatever pyautogui's internal timing happens to be."""
         win = self._guard(desc or f"click ({x},{y})")
         try:
             ox, oy = self.origin()
             sx, sy = (ox + x, oy + y) if relative else (x, y)
             before = self._shot("before")
             ca.log_click(sx, sy, button)
-            pyautogui.click(sx, sy, clicks=clicks, button=button)
+            pyautogui.moveTo(sx, sy)
+            for _ in range(clicks):
+                pyautogui.mouseDown(button=button)
+                time.sleep(0.02)
+                pyautogui.mouseUp(button=button)
+                if clicks > 1:
+                    time.sleep(0.05)
             time.sleep(0.15)
             after = self._shot("after")
             return {"ok": True, "x": sx, "y": sy, "button": button,
