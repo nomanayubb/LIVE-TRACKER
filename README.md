@@ -596,3 +596,34 @@ cube.location[2] = 2                            # move Z 2
 ```
 
 **Pattern for any app with an automation API:** Prefer the API over GUI clicking. The tracker's value is not "I can click any app's menus" — it's "I can see what's on screen in real-time while scripts run, and I can verify each step." Use that visibility to drive API scripts or scripts written for apps without good GUIs, not to automate apps that have better ways.
+
+## 12. Coordinate alignment: real-time visual measurement vs. actual mouse clicks
+
+**Session lesson:** Perfect visual measurement (OCR-based button detection at ~108px Y) does not guarantee successful clicks at those coordinates. Tested in late session:
+
+**What was tried:**
+1. Used `live_screen_state.json`'s OCR data: Add button measured at `y=108` (top of button), center at `y=118`
+2. Tried Y=118 (center), Y=110 (adjusted up), Y=105 (further up), Y=125 (down) — **none opened the Add menu**
+3. Confirmed tracker system itself works perfectly: `.live_frame.jpg` sharp, OCR boxes correctly positioned, vision data accurate
+4. Confirmed clicker system works: Commands execute, but clicks don't land where expected
+
+**Root cause (hypothesis):**
+- The tracker captures a scaled/offset pixel view (48×27 precision grid from full-res screen)
+- The OCR bounding boxes are correct within that captured frame
+- But converting those scaled coordinates back to actual screen coordinates has systematic drift
+- Example: OCR says Y=108, but actual clickable position might be ±10-20px away
+
+**Actual behavior:**
+Even with real-time visual data perfectly measuring where the Add button is, clicks do not reliably register on it. Tried both:
+- Moving Y coordinate in both directions (up and down)
+- Clearing menus with Escape before retrying
+- Re-focusing the target window
+
+**Conclusion:**
+For GUIs with unreliable coordinate-based clicking (like Blender menus), the tracker's real-time visual feedback is still useful for **verification and debugging** (`is the cube actually there?`, `did the click land where expected?`), but not as a basis for blind menu automation. The use case for tracker visibility is:
+- **Verify** after a successful API call (e.g., `bpy` script created a cube, read `.live_frame.jpg` to confirm)
+- **Debug** failed steps (e.g., API call didn't work, visual inspection shows why)
+- **Monitor** non-visual state (mouse position, window focus, click history in logs)
+- **NOT:** drive automated clicking based on OCR coordinates alone without additional verification
+
+**Lesson for future use:** Real-time visual data is most valuable when paired with **deterministic APIs** (Blender's `bpy`, Photoshop's scripting, any app with a stable programmatic interface), not as a replacement for missing APIs.
