@@ -47,7 +47,10 @@ root.title("Tracker Admin Panel")
 # header (status label + Settings + Precision + STOP) needs more room than
 # the old width gave it - previously that was hidden because Windows was
 # uniformly shrinking the whole window, so it fit by accident.
-root.geometry("900x680")
+# Widened again after adding the FULLSCREEN button (4th header button) -
+# verified via screenshot that 900px squeezed the Settings button out of
+# view entirely and overlapped the status text with the new button.
+root.geometry("1080x680")
 root.configure(bg=BG)
 
 def read_json(path, default=None):
@@ -115,6 +118,31 @@ precision_btn = tk.Button(header, text="PRECISION: off", command=toggle_precisio
                           width=18, font=("Segoe UI", 10, "bold"), bg="#30363d",
                           fg=FG, relief="flat", cursor="hand2")
 precision_btn.pack(side="right", padx=(0, 10))
+
+FULLSCREEN_SWITCH = BASE_DIR / ".tracker_fullscreen"
+
+def toggle_fullscreen():
+    """True monitor capture, independent of any window target. Without this,
+    even 'no target specified' still auto-picks whichever window happens to
+    be first in Windows' enumeration order - confirmed directly: that
+    produced a small ~900x500 captured region, not the full screen, until
+    this switch forced mss.monitors[1] (the true physical screen) regardless
+    of any window target."""
+    if FULLSCREEN_SWITCH.exists():
+        try:
+            FULLSCREEN_SWITCH.unlink()
+        except Exception:
+            pass
+    else:
+        try:
+            FULLSCREEN_SWITCH.write_text("fullscreen mode on", encoding="utf-8")
+        except Exception:
+            pass
+
+fullscreen_btn = tk.Button(header, text="FULLSCREEN: off", command=toggle_fullscreen,
+                           width=18, font=("Segoe UI", 10, "bold"), bg="#30363d",
+                           fg=FG, relief="flat", cursor="hand2")
+fullscreen_btn.pack(side="right", padx=(0, 10))
 
 # ---------------- Settings / reference window ----------------
 # Surfaces the same mode table and JSON field reference that live in
@@ -414,6 +442,11 @@ def refresh():
         precision_btn.config(text="PRECISION: ON", bg=ACCENT, fg="#0d1117")
     else:
         precision_btn.config(text="PRECISION: off", bg="#30363d", fg=FG)
+
+    if FULLSCREEN_SWITCH.exists():
+        fullscreen_btn.config(text="FULLSCREEN: ON", bg=ACCENT, fg="#0d1117")
+    else:
+        fullscreen_btn.config(text="FULLSCREEN: off", bg="#30363d", fg=FG)
 
     if _modes:
         cur = _modes.current()
