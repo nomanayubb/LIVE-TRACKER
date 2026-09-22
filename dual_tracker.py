@@ -11,6 +11,7 @@ Adds a genuine pixel-grid matrix (real per-cell average color across the
 whole frame, not just one brightness scalar) and a change bounding box
 (WHERE on screen changed between frames, not just a percentage).
 """
+import os
 import time
 import json
 import ctypes
@@ -793,8 +794,13 @@ def fast_worker(target_window_name):
                         cur_sig = int(gray.sum())
                         if cur_sig != last_frame_sig:
                             last_frame_sig = cur_sig
-                            cv2.imwrite(str(FRAME_FILE), img[:, :, :3],
+                            # Write to a temp file then atomically rename over the
+                            # real one, so a reader (e.g. a comparison script)
+                            # never opens a half-written JPEG mid-write.
+                            tmp_frame = FRAME_FILE.with_suffix(".tmp.jpg")
+                            cv2.imwrite(str(tmp_frame), img[:, :, :3],
                                         [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                            os.replace(tmp_frame, FRAME_FILE)
                     except Exception:
                         pass
 

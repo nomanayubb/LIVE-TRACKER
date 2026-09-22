@@ -493,3 +493,42 @@ Direct assignment is confirmed working but crude — the whole mesh follows one 
 
 **Next step if resuming:** re-verify current scene state via the console (`bpy.data.objects`, vertex group weights) before assuming anything above is still true — Ctrl+Z was used to recover from the duplication incident, and its exact end-state was not re-confirmed via automation after that.
 - Not yet done: parent mesh to armature with automatic weights, enter Pose Mode, test that the mesh actually deforms when a bone is moved (this is the actual fix/diagnosis for the original bug).
+
+## 9. Architecture — what depends on what (read this first in a new session)
+
+**Core question answered: is `dual_tracker.py` self-contained, or does it need the rest of the project to work?**
+Verified by grepping every `import`/`from` line in every core file (not assumed) — here is the real, complete dependency graph:
+
+```
+dual_tracker.py  ──imports──▶  claude_activity.py (as ca)
+                               (that's the ONLY project-local import dual_tracker.py has)
+
+clicker.py       ──imports──▶  claude_activity.py (as ca)
+                  ──imports──▶  vision.py
+
+admin_panel.py    ──imports──▶  modes.py   (lazy import, only inside one function, line ~299)
+
+overlay.py         no project-local imports at all — pure stdlib (json, tkinter, pathlib, ctypes)
+modes.py            no project-local imports — pure stdlib
+claude_activity.py  no project-local imports — pure stdlib
+vision.py           no project-local imports — cv2 + numpy only
+```
+
+**In plain terms:**
+- **`dual_tracker.py` is the one file that MUST run** for any live tracking to exist. It only needs `claude_activity.py` alongside it (for click attribution) — nothing else.
+- **`overlay.py` is 100% optional.** It never runs any tracking itself — it just opens a small always-on-top window that reads `.live_screen_state.json` and `.tracker_click_history.jsonl` (files `dual_tracker.py` already writes) and displays them nicely. Close it, delete it, never launch it — `dual_tracker.py` behaves identically either way. It exists purely so a human watching the screen can glance at current state without opening the raw JSON.
+- **`admin_panel.py` is also optional** — it's a GUI for flipping the switch files (`.tracker_precision`, `.tracker_paused`, `.tracker_fullscreen`, etc.) instead of creating/deleting them by hand or via `modes.apply()`. `dual_tracker.py` just polls for those files' existence every loop; it doesn't know or care whether admin_panel.py, modes.py, or a plain text editor created them.
+- **`clicker.py` is a separate, independent tool** (synthetic click/scroll/gesture automation) — it is not imported by `dual_tracker.py` and doesn't need it running, though it does read `claude_activity.py`'s click log to know what it itself has clicked recently.
+
+**How every file actually talks to every other file: plain disk files, not Python imports.** The entire system is glue-free by design — one process writes a file, another reads it, and neither needs to import the other or even run on the same schedule:
+
+| File on disk | Written by | Read by | Purpose |
+|---|---|---|---|
+| `.live_screen_state.json` | `dual_tracker.py` (every loop, ~90-100ms) | `overlay.py`, `admin_panel.py`, any comparison script | The live snapshot — all ~44 top-level fields |
+| `.live_frame.jpg` | `dual_tracker.py` (only when precision mode on, atomic write) | anything reading `exact_frame_png` path from the state JSON | The one genuinely sharp screenshot |
+| `.tracker_click_history.jsonl` | `dual_tracker.py` | `overlay.py` | Append-only click log (one JSON line per click/launch event) |
+| `.tracker_precision` / `.tracker_paused` / `.tracker_fullscreen` | `admin_panel.py`, `modes.py`, or manual `touch`/delete | `dual_tracker.py` (polled every loop, presence = on) | Runtime switches — pure file existence, no content matters |
+| `.tracker_window_config.txt` | `admin_panel.py` or manual write | `dual_tracker.py` | Which window title to target (empty/absent = first enumerated window, not full screen — see §8f for why `.tracker_fullscreen` exists) |
+| `.tracker_active_mode.txt` | `modes.py` (`apply()`) | `modes.py` (`current()`, to resolve naming ambiguity — see fix below) |  Which named preset is active, so two modes with identical switches (e.g. `normal`/`ui_automation`/`motion_capture`) still report their real name back |
+
+**Conclusion for a fresh session:** if you only care about live tracking data existing, you need exactly two files running together — `dual_tracker.py` and its one import `claude_activity.py` — everything else (`overlay.py`, `admin_panel.py`, `modes.py`, `clicker.py`, `vision.py`, all `compare_*`/`generate_*` scripts) is an optional consumer or optional control surface that talks to it purely through the disk files above, never through Python imports. Precision mode is confirmed (via this session's matrix generation and manual state checks) to be the most reliable/sharpest capture mode and is the recommended default for serious tracking work.
