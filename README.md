@@ -532,3 +532,22 @@ vision.py           no project-local imports — cv2 + numpy only
 | `.tracker_active_mode.txt` | `modes.py` (`apply()`) | `modes.py` (`current()`, to resolve naming ambiguity — see fix below) |  Which named preset is active, so two modes with identical switches (e.g. `normal`/`ui_automation`/`motion_capture`) still report their real name back |
 
 **Conclusion for a fresh session:** if you only care about live tracking data existing, you need exactly two files running together — `dual_tracker.py` and its one import `claude_activity.py` — everything else (`overlay.py`, `admin_panel.py`, `modes.py`, `clicker.py`, `vision.py`, all `compare_*`/`generate_*` scripts) is an optional consumer or optional control surface that talks to it purely through the disk files above, never through Python imports. Precision mode is confirmed (via this session's matrix generation and manual state checks) to be the most reliable/sharpest capture mode and is the recommended default for serious tracking work.
+
+### 9a. Clicking: two completely separate systems, don't confuse them
+
+There are two unrelated things both called "clicking" in this project. Verified directly from code, not assumed:
+
+**1. Click *detection/reporting* — lives in `dual_tracker.py`, is the important one, is always on.**
+A dedicated background thread (`click_poll_worker`, `dual_tracker.py:145`) polls `GetAsyncKeyState(VK_LBUTTON)` every 2ms — a pure read-only query, not a system hook (see §8c for why a hook was tried once and is now permanently banned for this project). Every real click, from anyone, is caught the instant it happens and:
+- attributed to `"you"` or `"claude"` by matching against `claude_activity.py`'s log (80px / 1.5s window)
+- written into `.live_screen_state.json` as the `last_click` field
+- appended permanently to `.tracker_click_history.jsonl`
+
+This needs nothing else running. **The tracker itself always tells you about clicks** — that's on by default the moment `dual_tracker.py` is running.
+
+**2. Click *generation* — lives in `clicker.py`, is optional, is a separate tool.**
+This is the automation side: `click_at()`, `swipe()`, `zoom()`, `scroll()` — it performs synthetic clicks/scrolls/gestures on command (used for Blender automation, etc). It does not detect anything itself; it just logs what it did to `claude_activity.py` so `dual_tracker.py`'s detector (see #1) can correctly attribute the resulting click as `"claude"` instead of misreading it as the user.
+
+**`overlay.py`'s role in clicking: read-only display, nothing more.** Its "Last click" / "Recent clicks" panel just reads `.tracker_click_history.jsonl` (already written by `dual_tracker.py`, per #1) and prints it nicely on screen. It does not detect clicks, does not affect attribution, and closing it has zero effect on click tracking — you only lose the on-screen popup, not the underlying log.
+
+**Bottom line:** for click tracking to exist at all, only `dual_tracker.py` matters. `clicker.py` is only needed if something needs to *perform* clicks programmatically. `overlay.py` is only needed if a human wants to *see* click history on screen instead of reading the raw `.jsonl`/JSON.
