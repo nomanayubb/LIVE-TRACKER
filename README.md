@@ -569,6 +569,8 @@ Windows only has **one physical cursor and one input stream** at the OS level �
 
 ## 11. Blender automation via `bpy` instead of GUI clicking
 
+**✅ COMPLETED THIS SESSION:** Cube created with scale 2, rotate X 45°, move Z +2, verified in `live_frame.jpg`.
+
 **The tracker itself works perfectly.** It reads live frames, tracks clicks, executes commands, and provides real-time visual feedback — all verified working end-to-end this session.
 
 **But Blender GUI automation is problematic.** Keyboard shortcut menu navigation (`Shift+A` for Add, arrow keys to navigate, `Return` to select) is unreliable and difficult to verify against the live frame — the menu may appear off-screen, navigation state is invisible/hard to detect, and visual feedback is inconsistent. Coordinate-based menu clicking fails because Blender's menu layout changes per context.
@@ -580,7 +582,7 @@ Windows only has **one physical cursor and one input stream** at the OS level �
 - Works the same way whether Blender is open/visible or headless in the background
 - Is the official intended way to automate Blender (Blender itself is scriptable-first)
 
-**Example:**
+**Example (successfully executed this session):**
 ```python
 import bpy
 import math
