@@ -111,6 +111,7 @@ Replace `"Blender"` with any window title substring to track a different app. Om
 | `pixel_grid`, `grid_cols`, `grid_rows` | The RGB colour grid (16×9 normal / 48×27 precision) — see "Precision mode" |
 | `precision_mode` | Whether the richer grid + exact frame are active |
 | `exact_frame_png` | Path to the sharp JPEG, only present when `precision_mode` is true |
+| `fullscreen_mode` | Whether `.tracker_fullscreen` is forcing true monitor capture regardless of any window target |
 | `frame_change_pct`, `frame_change_bbox` | How much of the screen changed since last tick, and where (`[x,y,w,h]`) |
 | `selection_blob_count`, `selection_blob_center` | Orange-outline (Blender-style selection) detector |
 | `text_data`, `ocr_text`, `ocr_boxes`, `ocr_ts`, `ocr_age_ms`, `ocr_pass_count`, `ocr_passes`, `new_text_tokens` | OCR output, freshness, and what text newly appeared |
@@ -294,6 +295,12 @@ The first fix attempted was a `WH_MOUSE_LL` low-level mouse hook - event-driven,
 Verified before integrating: an isolated 15-second test caught 4 of 5 rapid synthetic clicks (50ms apart) versus 0 of 2 with the old once-per-tick approach. Verified after integrating: the exact previously-failing scenario (a `clicker.py` click on Notepad) was correctly captured and attributed - `"by": "claude"`, `"claude_delay_s": 0.04`, first time all session.
 
 **The lesson, stated plainly: prefer a slower fix that can only degrade gracefully over a faster one that can fail catastrophically.** A polling gap loses data. A misbehaving system-wide hook can take over someone's mouse. Those are not the same category of risk, even though the hook looked like the more "correct" engineering solution on paper.
+
+### 8f. "No target specified" is NOT the same as "capture the physical screen"
+
+Confirmed directly: launching `dual_tracker.py` with no window-title argument does not capture the true monitor independent of windows. It auto-picks whichever window happens to be first in Windows' own enumeration order (`if not current_target and all_windows: current_target = all_windows[0].title`). That window can happen to be maximized (making the region look full-screen by coincidence), but it will shrink or shift the moment that window resizes or a different window becomes first in the list.
+
+For genuine, window-independent full-screen capture, create `.tracker_fullscreen` - this forces `monitor = sct.monitors[1]` (the true physical screen) regardless of what `current_target` is set to, even if a specific window target is also configured. The JSON reports this via `fullscreen_mode: true`. Verified: with `.tracker_window_config.txt` explicitly set to `"Notepad"` (a ~900x500 window), enabling this switch still produced `screen_resolution: 1920x1080` and a full 1920x1080 exact-pixel frame in precision mode.
 
 ### 8e. Taskbar/desktop icon clicks: identifying WHICH app was launched, not just "explorer.exe"
 

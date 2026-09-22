@@ -50,6 +50,21 @@ CHANGE_HISTORY = BASE_DIR / ".tracker_change_history.jsonl"  # append-only log o
 MAX_SNAPSHOTS = 60
 FRAME_FILE = BASE_DIR / ".live_frame.jpg"
 PRECISION_SWITCH = BASE_DIR / ".tracker_precision"   # create this file to enable precision mode
+FULLSCREEN_SWITCH = BASE_DIR / ".tracker_fullscreen"  # create this file to force true monitor capture
+
+def fullscreen_on():
+    """True monitor capture, independent of any window. Without this, even
+    'no target specified' still auto-picks whichever window happens to be
+    first in Windows' enumeration order (see the fast_worker loop) - it is
+    NOT the same as capturing the physical screen regardless of windows.
+    Confirmed directly: with no target given, the tracker locked onto
+    whatever window Windows listed first (it happened to be a maximized one,
+    so the region looked full-screen, but would shrink the moment that
+    window changed size or a different window became first in the list)."""
+    try:
+        return FULLSCREEN_SWITCH.exists()
+    except Exception:
+        return False
 
 # Two capture profiles. NORMAL is the default and stays fast (~5-9ms loop).
 # PRECISION is opt-in for when maximum detail matters, and deliberately costs
@@ -614,9 +629,12 @@ def fast_worker(target_window_name):
                     continue
 
                 monitor = sct.monitors[1]
-                if target_window:
+                force_fullscreen = fullscreen_on()
+                if target_window and not force_fullscreen:
                     monitor = {'top': max(0, target_window.top), 'left': max(0, target_window.left),
                                'width': max(100, target_window.width), 'height': max(100, target_window.height)}
+                # force_fullscreen leaves monitor as sct.monitors[1] - the true
+                # physical screen - regardless of any window, auto-picked or not.
 
                 # Pixel capture is the expensive part - measured mss.grab at ~33ms and
                 # full-res cvtColor at ~12ms, vs <1ms for every non-pixel signal
@@ -824,6 +842,7 @@ def fast_worker(target_window_name):
                     "frame_change_pct": change_pct, "frame_change_bbox": change_bbox,
                     "selection_blob_count": blob_count, "selection_blob_center": blob_center,
                     "pixel_grid": grid, "grid_cols": g_cols, "grid_rows": g_rows, "precision_mode": precision,
+                    "fullscreen_mode": force_fullscreen,
                     "text_data": ocr_text, "ocr_boxes": ocr_boxes, "ocr_age_ms": ocr_age_ms,
                     "new_text_tokens": new_text_tokens, "clipboard": clipboard,
                     "claude_active": claude_activity["active"], "claude_window": claude_activity["window"],
