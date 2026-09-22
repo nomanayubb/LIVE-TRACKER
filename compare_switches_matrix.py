@@ -94,7 +94,10 @@ def main():
                 time.sleep(6)
                 st = _read_state()
                 if paused or st.get("status") == "PAUSED":
-                    panels.append(panel(title, None, [mode_names, "ALL CAPTURE HALTED"], False))
+                    panels.append(panel(title, None,
+                                        [mode_names, "ALL CAPTURE HALTED",
+                                         "identical regardless of Pr/FS - pause checked first"],
+                                        False))
                     continue
                 cols, rows = st.get("grid_cols", "?"), st.get("grid_rows", "?")
                 res = st.get("screen_resolution", "?")
