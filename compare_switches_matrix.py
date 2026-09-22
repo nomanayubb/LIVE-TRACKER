@@ -24,7 +24,7 @@ FULLSCREEN_SWITCH = BASE_DIR / ".tracker_fullscreen"
 OUT = BASE_DIR / "switch_matrix.jpg"
 
 PANEL_W, PANEL_H = 480, 270
-HEADER_H = 78
+HEADER_H = 94   # +16 to fit the added named-mode line without crowding
 
 
 def _set(path, on):
@@ -62,10 +62,22 @@ def panel(title, img, lines, ok=True):
     cv2.rectangle(p, (0, 0), (PANEL_W - 1, PANEL_H - 1), colour, 2)
     cv2.rectangle(p, (0, PANEL_H), (PANEL_W, PANEL_H + HEADER_H), (28, 28, 28), -1)
     cv2.putText(p, title, (8, PANEL_H + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 2)
-    for i, line in enumerate(lines[:2]):
+    for i, line in enumerate(lines[:3]):
         cv2.putText(p, line[:56], (8, PANEL_H + 42 + i * 16),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
     return p
+
+
+# Which named modes correspond to which raw (paused, precision) combination.
+# Several names share IDENTICAL switches - they only differ in which other
+# module you use (vision.py vs motion.py) or intent, not in these two flags.
+# fullscreen is independent of all of them, so it is not part of this map.
+NAMED_MODES = {
+    (False, False): "normal / ui_automation / motion_capture",
+    (False, True): "text_reading / evidence",
+    (True, False): "privacy",
+    (True, True): "privacy",   # paused overrides precision regardless
+}
 
 
 def main():
@@ -73,6 +85,7 @@ def main():
     for paused in (False, True):
         for precision in (False, True):
             for fullscreen in (False, True):
+                mode_names = NAMED_MODES[(paused, precision)]
                 title = f"P={int(paused)} Pr={int(precision)} FS={int(fullscreen)}"
                 print(f"testing: {title}", flush=True)
                 _set(PAUSE_SWITCH, paused)
@@ -81,12 +94,12 @@ def main():
                 time.sleep(6)
                 st = _read_state()
                 if paused or st.get("status") == "PAUSED":
-                    panels.append(panel(title, None, ["ALL CAPTURE HALTED"], False))
+                    panels.append(panel(title, None, [mode_names, "ALL CAPTURE HALTED"], False))
                     continue
                 cols, rows = st.get("grid_cols", "?"), st.get("grid_rows", "?")
                 res = st.get("screen_resolution", "?")
                 loop = st.get("avg_loop_ms", "?")
-                lines = [f"grid {cols}x{rows}  res={res}", f"loop={loop}ms"]
+                lines = [mode_names, f"grid {cols}x{rows}  res={res}", f"loop={loop}ms"]
                 panels.append(panel(title, grid_to_image(st), lines, True))
 
     cols = 4
