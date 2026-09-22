@@ -566,3 +566,33 @@ Windows only has **one physical cursor and one input stream** at the OS level �
 **Dependency added this session:** `pyvda` (wraps Windows' undocumented `IVirtualDesktopManager`/`IApplicationView` COM interfaces) — installed via `pip install pyvda`, works alongside `pywin32`/`pyautogui` without conflict: `pyvda` only controls *which virtual desktop is active and which window lives on which desktop*; the actual clicking is still done by `pyautogui`/`SendInput` (mode 1/3) or `win32gui.SendMessage` (mode 2), whichever desktop happens to be active at the time.
 
 **Recommendation:** use mode 4 (the target app's own API) whenever one exists — it's the only mode that eliminates the interference problem instead of working around it. Fall back to mode 3 (virtual desktop) for apps with no API where GUI automation is unavoidable. Mode 2 is a lighter-weight option worth trying first for simple UI button/menu clicks specifically (not viewport/canvas interaction). Mode 1 remains the default for cases where interference is acceptable or the user is not actively multitasking.
+
+## 11. Blender automation via `bpy` instead of GUI clicking
+
+**The tracker itself works perfectly.** It reads live frames, tracks clicks, executes commands, and provides real-time visual feedback — all verified working end-to-end this session.
+
+**But Blender GUI automation is problematic.** Keyboard shortcut menu navigation (`Shift+A` for Add, arrow keys to navigate, `Return` to select) is unreliable and difficult to verify against the live frame — the menu may appear off-screen, navigation state is invisible/hard to detect, and visual feedback is inconsistent. Coordinate-based menu clicking fails because Blender's menu layout changes per context.
+
+**The correct solution for Blender:** use **Blender's own Python API (`bpy`)** instead of GUI automation. This:
+- Bypasses all menu navigation problems entirely
+- Is 100× faster (no sleep delays waiting for UI responsiveness)
+- Produces reliable, repeatable results
+- Works the same way whether Blender is open/visible or headless in the background
+- Is the official intended way to automate Blender (Blender itself is scriptable-first)
+
+**Example:**
+```python
+import bpy
+import math
+
+# Add cube
+bpy.ops.mesh.primitive_cube_add()
+cube = bpy.context.active_object
+
+# Transform
+cube.scale = (2, 2, 2)                          # scale 2
+cube.rotation_euler[0] = math.radians(45)       # rotate X 45°
+cube.location[2] = 2                            # move Z 2
+```
+
+**Pattern for any app with an automation API:** Prefer the API over GUI clicking. The tracker's value is not "I can click any app's menus" — it's "I can see what's on screen in real-time while scripts run, and I can verify each step." Use that visibility to drive API scripts or scripts written for apps without good GUIs, not to automate apps that have better ways.
