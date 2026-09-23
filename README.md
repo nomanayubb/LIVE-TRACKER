@@ -41,6 +41,8 @@ nohup python admin_panel.py > admin.log 2>&1 &                        # control 
 ```
 Give it ~20-30s on first launch (EasyOCR loads its model then). Check `.live_screen_state.json` or the admin panel to confirm it's alive.
 
+**Default mode is `text_reading` (precision ON)**, not `normal` — on the very first run on a machine (no `.tracker_active_mode.txt` yet), `dual_tracker.py` auto-applies it. This was changed from `normal` because exact-frame capture (`.live_frame.jpg`) is what real-time visual tracking sessions actually need; `normal`'s 16x9 grid alone isn't enough to see what's on screen. Switch to `normal` explicitly (`python modes.py apply normal`) if you specifically want the lower-cost mode instead. See §13 for the timing measured in each mode.
+
 ## Verification status — every mode actually tested, not just documented
 
 All 6 modes were driven end-to-end against `dual_tracker.py`'s real output (not just read from source) in a dedicated test pass. Results:

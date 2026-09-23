@@ -834,10 +834,13 @@ def fast_worker(target_window_name, frame_shm=None, max_h=0, max_w=0, mgr_dict=N
 
                 if now - last_snapshot_time > 3:
                     try:
-                        from PIL import Image
-                        Image.fromarray(img[:, :, :3][:, :, ::-1]).save(SNAPSHOT_DIR / f"snap_{int(now)}.png")
+                        # JPEG instead of PNG: PNG-encoding 1920x1080 measured ~100ms+
+                        # and briefly stalled the loop every 3s; JPEG is a fraction of that.
+                        tmp_snap = SNAPSHOT_DIR / f"snap_{int(now)}.tmp.jpg"
+                        cv2.imwrite(str(tmp_snap), img[:, :, :3], [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                        os.replace(tmp_snap, SNAPSHOT_DIR / f"snap_{int(now)}.jpg")
                         last_snapshot_time = now
-                        existing = sorted(SNAPSHOT_DIR.glob("snap_*.png"))
+                        existing = sorted(SNAPSHOT_DIR.glob("snap_*.jpg"))
                         while len(existing) > MAX_SNAPSHOTS:
                             existing.pop(0).unlink(missing_ok=True)
                     except Exception:
@@ -951,6 +954,18 @@ if __name__ == "__main__":
     print("DUAL-LOOP TRACKER: fast pixel thread + parallel OCR/vision PROCESSES")
     print("=" * 60)
     target = sys.argv[1] if len(sys.argv) > 1 else None
+
+    # Default mode: text_reading (precision ON) instead of normal, on a fresh
+    # setup where no mode has ever been explicitly recorded. An explicit prior
+    # choice (recorded in .tracker_active_mode.txt, gitignored/per-machine) is
+    # never overridden - this only fires the very first time on a machine.
+    try:
+        import modes as _modes
+        if not _modes.ACTIVE_FILE.exists():
+            _modes.apply("text_reading")
+            print("First run on this machine: defaulting to text_reading mode (precision ON).")
+    except Exception:
+        pass
 
     # vision/OCR run as separate PROCESSES (not threads) so their CPU-bound
     # OpenCV/EasyOCR work cannot hold the GIL and stall the fast pixel loop -
