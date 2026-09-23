@@ -18,6 +18,8 @@ import ctypes
 import sys
 import threading
 import queue
+import multiprocessing as mp
+from multiprocessing import shared_memory
 from pathlib import Path
 from collections import deque
 
@@ -335,64 +337,82 @@ def init_easyocr():
 
 # ---------------- OCR thread (slow, ~150-300ms per pass, never blocks fast loop) ----------------
 
-def vision_worker():
+def vision_worker(shm_name, max_h, max_w, mgr_dict):
     """Third parallel loop: structural screen understanding WITHOUT OCR.
-    Benchmarked at ~40-90ms per full scan, so it gets its own thread rather
-    than blocking the ~15ms pixel loop - same reasoning as the OCR thread.
+    Runs as a SEPARATE PROCESS (not a thread) so its CPU-bound OpenCV work
+    cannot hold Python's GIL and stall the fast pixel/frame loop - measured:
+    as a thread, this starved the fast loop from ~15ms to ~175ms per cycle
+    whenever a scan ran, no matter how the scan itself was throttled, because
+    the GIL is held for the whole scan duration regardless of frequency.
+    A separate process has its own GIL/interpreter, so the fast loop in the
+    main process is never blocked by this work.
     Finds rectangles (buttons/panels), text regions (where text is, without
     reading it), lines, corners, layout dividers, and change grids."""
     import vision
+    shm = shared_memory.SharedMemory(name=shm_name)
+    frame_buf = np.ndarray((max_h, max_w, 4), dtype=np.uint8, buffer=shm.buf)
     heavy_counter = 0
-    # Rate limit: running this flat-out starved the fast loop (measured: fast
-    # loop degraded 15ms -> 175ms and OCR fell 17s behind, because CPU-bound
-    # OpenCV work competes for cores/GIL). Structural layout doesn't change
-    # 20x/second, so ~4 scans/sec is plenty and leaves the other loops room.
+    prev_gray = None
+    last_seen_ts = 0.0
+    # Rate limit: structural layout doesn't change 20x/second, ~4 scans/sec is plenty.
     TARGET_INTERVAL = 0.25
-    while not shared["stop"]:
-        cycle_start = time.time()
-        if PAUSE_SWITCH.exists():
-            time.sleep(0.3)
-            continue
-        with lock:
-            frame = shared["frame"]
-            frame_ts = shared["frame_ts"]
-        if frame is None:
-            time.sleep(0.05)
-            continue
-        try:
-            heavy_counter += 1
-            prev = getattr(vision_worker, "_prev_gray", None)
-            gray = cv2.cvtColor(frame[:, :, :3].astype(np.uint8), cv2.COLOR_BGR2GRAY)
-            result = vision.scan_all(frame, prev_gray=prev,
-                                     heavy=(heavy_counter % 10 == 0))  # deep pass occasionally
-            vision_worker._prev_gray = gray
-            with lock:
-                shared["vision"] = result
-                shared["vision_ts"] = frame_ts
-                shared["vision_pass_count"] += 1
-        except Exception as e:
-            with lock:
-                shared["vision"] = {"error": str(e)}
-        # yield the CPU back to the fast/OCR loops for the rest of the interval
-        time.sleep(max(0.02, TARGET_INTERVAL - (time.time() - cycle_start)))
+    try:
+        while not mgr_dict.get("stop"):
+            cycle_start = time.time()
+            if PAUSE_SWITCH.exists():
+                time.sleep(0.3)
+                continue
+            frame_ts = mgr_dict.get("frame_ts", 0.0)
+            shape = mgr_dict.get("frame_shape")
+            if shape is None or frame_ts == last_seen_ts:
+                time.sleep(0.02)
+                continue
+            h, w, c = shape
+            frame = frame_buf[:h, :w, :c].copy()
+            last_seen_ts = frame_ts
+            try:
+                heavy_counter += 1
+                gray = cv2.cvtColor(frame[:, :, :3].astype(np.uint8), cv2.COLOR_BGR2GRAY)
+                result = vision.scan_all(frame, prev_gray=prev_gray,
+                                         heavy=(heavy_counter % 10 == 0))  # deep pass occasionally
+                prev_gray = gray
+                mgr_dict["vision"] = result
+                mgr_dict["vision_ts"] = frame_ts
+                mgr_dict["vision_pass_count"] = mgr_dict.get("vision_pass_count", 0) + 1
+            except Exception as e:
+                mgr_dict["vision"] = {"error": str(e)}
+            # yield the CPU back to the fast/OCR loops for the rest of the interval
+            time.sleep(max(0.02, TARGET_INTERVAL - (time.time() - cycle_start)))
+    finally:
+        shm.close()
 
-def ocr_worker():
+def ocr_worker(shm_name, max_h, max_w, mgr_dict):
+    """Runs as a SEPARATE PROCESS - see vision_worker's docstring for why:
+    EasyOCR/torch CPU work held the GIL for its full 150-300ms pass and
+    stalled the fast loop even though it ran in 'its own thread'. A separate
+    process removes that contention entirely."""
     reader = init_easyocr()
+    shm = shared_memory.SharedMemory(name=shm_name)
+    frame_buf = np.ndarray((max_h, max_w, 4), dtype=np.uint8, buffer=shm.buf)
     last_tokens = set()
     last_phash = None
+    last_seen_ts = 0.0
     OCR_MIN_INTERVAL = 0.4   # text doesn't change 10x/second; running back-to-back
                              # was pushing OCR 16-23s behind the live frame
-    while not shared["stop"]:
+    try:
+      while not mgr_dict.get("stop"):
         cycle_start = time.time()
         if PAUSE_SWITCH.exists():
             time.sleep(0.3)
             continue
-        with lock:
-            frame = shared["frame"]
-            frame_ts = shared["frame_ts"]
-        if frame is None or reader is None:
+        frame_ts = mgr_dict.get("frame_ts", 0.0)
+        shape = mgr_dict.get("frame_shape")
+        if shape is None or reader is None or frame_ts == last_seen_ts:
             time.sleep(0.05)
             continue
+        h, w, c = shape
+        frame = frame_buf[:h, :w, :c].copy()
+        last_seen_ts = frame_ts
         try:
             # Skip the whole expensive OCR pass if the screen is visually unchanged
             # since the last one - on a static screen this saves ~100% of the cost.
@@ -435,7 +455,7 @@ def ocr_worker():
                     entry = {
                         "t": round(time.time(), 2),
                         "clock": time.strftime("%H:%M:%S"),
-                        "window": shared.get("ocr_window_label", ""),
+                        "window": mgr_dict.get("ocr_window_label", ""),
                         "appeared": sorted(new_tokens)[:25],
                         "disappeared": sorted(gone_tokens)[:25],
                     }
@@ -444,22 +464,23 @@ def ocr_worker():
                 except Exception:
                     pass
             last_tokens = tokens
-            with lock:
-                shared["ocr_text"] = text_joined
-                shared["ocr_boxes"] = boxes
-                shared["ocr_ts"] = frame_ts
-                shared["new_text_tokens"] = new_tokens
-                shared["ocr_pass_count"] += 1
+            mgr_dict["ocr_text"] = text_joined
+            mgr_dict["ocr_boxes"] = boxes
+            mgr_dict["ocr_ts"] = frame_ts
+            mgr_dict["new_text_tokens"] = new_tokens
+            mgr_dict["ocr_pass_count"] = mgr_dict.get("ocr_pass_count", 0) + 1
         except Exception as e:
-            with lock:
-                shared["ocr_text"] = f"OCR error: {e}"
+            mgr_dict["ocr_text"] = f"OCR error: {e}"
         # hold to the minimum interval so OCR can't monopolise the CPU
         time.sleep(max(0.05, OCR_MIN_INTERVAL - (time.time() - cycle_start)))
+    finally:
+        shm.close()
 
 # ---------------- fast pixel-capture thread (~30-50ms target) ----------------
 
-def fast_worker(target_window_name):
+def fast_worker(target_window_name, frame_shm=None, max_h=0, max_w=0, mgr_dict=None):
     current_target = target_window_name
+    frame_arr = np.ndarray((max_h, max_w, 4), dtype=np.uint8, buffer=frame_shm.buf) if frame_shm else None
     last_activated = None
     prev_gray = None
     prev_fg_title = None
@@ -467,6 +488,7 @@ def fast_worker(target_window_name):
     frame_times = deque(maxlen=60)
     iteration = 0
     last_snapshot_time = 0
+    last_frame_write_time = 0
     last_click_info = None
     pending_explorer_clicks = []   # explorer.exe clicks awaiting a foreground change to link to
     # Pixel capture (mss.grab ~33ms + cvtColor ~12ms) runs on this slower cadence;
@@ -497,8 +519,8 @@ def fast_worker(target_window_name):
                                 f"All capture and reporting halted. Delete {PAUSE_SWITCH.name} to resume.\n")
                     with open(JSON_FILE, "w", encoding="utf-8") as jf:
                         json.dump({"status": "PAUSED", "timestamp": time.time()}, jf)
-                    with lock:
-                        shared["frame"] = None
+                    if mgr_dict is not None:
+                        mgr_dict["frame_shape"] = None
                     if iteration % 20 == 0:
                         with open(STATS_FILE, "w", encoding="utf-8") as sf:
                             json.dump(stats, sf)
@@ -773,16 +795,23 @@ def fast_worker(target_window_name):
                     ]
 
                 now = time.time()
-                with lock:
-                    shared["frame"] = img.copy()
-                    shared["frame_ts"] = now
-                    shared["ocr_window_label"] = current_target or fg_title
-                    ocr_text = shared["ocr_text"]
-                    ocr_boxes = shared["ocr_boxes"]
-                    ocr_ts = shared["ocr_ts"]
-                    new_text_tokens = shared["new_text_tokens"]
-                    vision_result = shared["vision"]
-                    vision_ts = shared["vision_ts"]
+                if frame_arr is not None:
+                    fh, fw = img.shape[:2]
+                    fc = img.shape[2] if img.ndim == 3 else 1
+                    if fh <= max_h and fw <= max_w:
+                        frame_arr[:fh, :fw, :fc] = img[:, :, :fc]
+                        mgr_dict["frame_shape"] = (fh, fw, fc)
+                        mgr_dict["frame_ts"] = now
+                    mgr_dict["ocr_window_label"] = current_target or fg_title
+                    ocr_text = mgr_dict.get("ocr_text", "")
+                    ocr_boxes = mgr_dict.get("ocr_boxes", [])
+                    ocr_ts = mgr_dict.get("ocr_ts", 0.0)
+                    new_text_tokens = mgr_dict.get("new_text_tokens", [])
+                    vision_result = mgr_dict.get("vision", {})
+                    vision_ts = mgr_dict.get("vision_ts", 0.0)
+                else:
+                    ocr_text, ocr_boxes, ocr_ts = "", [], 0.0
+                    new_text_tokens, vision_result, vision_ts = [], {}, 0.0
 
                 # Keep an exact-pixel image of the current frame on disk, so the JSON
                 # report and the true original pixels are both available without a
@@ -791,12 +820,11 @@ def fast_worker(target_window_name):
                 # ~100ms+ (loop went 90 -> 188ms), JPEG q92 is a fraction of that.
                 if do_pixels and precision:
                     try:
-                        cur_sig = int(gray.sum())
-                        if cur_sig != last_frame_sig:
-                            last_frame_sig = cur_sig
-                            # Write to a temp file then atomically rename over the
-                            # real one, so a reader (e.g. a comparison script)
-                            # never opens a half-written JPEG mid-write.
+                        frame_age = now_input - last_frame_write_time
+                        # Write EVERY 128ms (consistent timing) OR on major pixel change
+                        if frame_age > 0.128 or (int(gray.sum()) != last_frame_sig and frame_age > 0.05):
+                            last_frame_sig = int(gray.sum())
+                            last_frame_write_time = now_input
                             tmp_frame = FRAME_FILE.with_suffix(".tmp.jpg")
                             cv2.imwrite(str(tmp_frame), img[:, :, :3],
                                         [int(cv2.IMWRITE_JPEG_QUALITY), 35])
@@ -821,8 +849,7 @@ def fast_worker(target_window_name):
                           f"write={t_write*1000:.1f} loop={loop_ms:.1f}")
 
                 if iteration % 20 == 0:
-                    with lock:
-                        stats["ocr_passes"] = shared["ocr_pass_count"]
+                    stats["ocr_passes"] = mgr_dict.get("ocr_pass_count", 0) if mgr_dict is not None else 0
                     stats["uptime_seconds"] = round(time.time() - session_start, 1)
                     try:
                         with open(STATS_FILE, "w", encoding="utf-8") as sf:
@@ -921,18 +948,39 @@ STATUS: Running
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("DUAL-LOOP TRACKER: fast pixel thread + parallel OCR thread")
+    print("DUAL-LOOP TRACKER: fast pixel thread + parallel OCR/vision PROCESSES")
     print("=" * 60)
     target = sys.argv[1] if len(sys.argv) > 1 else None
-    ocr_thread = threading.Thread(target=ocr_worker, daemon=True)
-    ocr_thread.start()
-    vision_thread = threading.Thread(target=vision_worker, daemon=True)
-    vision_thread.start()
+
+    # vision/OCR run as separate PROCESSES (not threads) so their CPU-bound
+    # OpenCV/EasyOCR work cannot hold the GIL and stall the fast pixel loop -
+    # see vision_worker/ocr_worker docstrings for the measured impact this had
+    # as threads (fast loop degraded 15ms -> 175ms+ every time either one ran).
+    with mss.mss() as _sct:
+        _mon = _sct.monitors[1]
+    MAX_H, MAX_W = _mon["height"], _mon["width"]
+    frame_shm = shared_memory.SharedMemory(create=True, size=MAX_H * MAX_W * 4)
+    mp_manager = mp.Manager()
+    mgr_dict = mp_manager.dict({
+        "stop": False, "frame_shape": None, "frame_ts": 0.0, "ocr_window_label": "",
+        "vision": {}, "vision_ts": 0.0, "vision_pass_count": 0,
+        "ocr_text": "", "ocr_boxes": [], "ocr_ts": 0.0, "new_text_tokens": [], "ocr_pass_count": 0,
+    })
+
+    ocr_proc = mp.Process(target=ocr_worker, args=(frame_shm.name, MAX_H, MAX_W, mgr_dict), daemon=True)
+    ocr_proc.start()
+    vision_proc = mp.Process(target=vision_worker, args=(frame_shm.name, MAX_H, MAX_W, mgr_dict), daemon=True)
+    vision_proc.start()
     click_thread = threading.Thread(target=click_poll_worker, daemon=True)
     click_thread.start()
-    print("Threads: fast pixel loop (~15ms) | vision scan (~40-90ms) | OCR (~150-300ms) | click poll (2ms, pure query)")
+    print("Fast pixel loop (thread, ~15ms) | vision scan (PROCESS, ~40-90ms) | OCR (PROCESS, ~150-300ms) | click poll (thread, 2ms)")
     try:
-        fast_worker(target)
+        fast_worker(target, frame_shm=frame_shm, max_h=MAX_H, max_w=MAX_W, mgr_dict=mgr_dict)
     except KeyboardInterrupt:
         shared["stop"] = True
+        mgr_dict["stop"] = True
+        ocr_proc.join(timeout=2)
+        vision_proc.join(timeout=2)
+        frame_shm.close()
+        frame_shm.unlink()
         print("Stopped by user")
