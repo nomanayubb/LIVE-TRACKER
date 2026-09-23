@@ -655,3 +655,42 @@ Also: when polling a file externally (e.g. from PowerShell) to detect new writes
 - Frame-write gate: `frame_age > 0.1` (100ms) OR pixel signature changed — controls `.live_frame.jpg` write frequency, independent of the JSON data loop.
 - JPEG quality: `35` (lowered from the original `92` for faster encoding; visually still fine for tracking purposes, not archival quality).
 - `vision_worker`'s `TARGET_INTERVAL = 0.25`, `ocr_worker`'s `OCR_MIN_INTERVAL = 0.4` — unchanged from before; these still throttle how often each process scans, they just no longer matter for `fast_worker`'s speed since they're isolated in their own processes now.
+
+## 14. Session summary: what changed, what every file does, and the standing workflow going forward
+
+Written so a future session never needs this re-explained. Read this section first if picking up interactive automation work (Blender or any other app) in this project.
+
+### Files touched this session
+
+| File | What changed / its role |
+|---|---|
+| `dual_tracker.py` | Fixed the GIL contention bug (§13). Changed the default mode to `text_reading` on first run per machine. Switched the 3s snapshot writer from PNG to JPEG (faster, no periodic loop stall). Frame-write threshold tightened to 100ms. |
+| `frame_capture.py` | **New.** Standalone, read-only companion to the tracker — never imports or modifies `dual_tracker.py`. Buffers real `.live_frame.jpg` captures during a task window, then builds one contact-sheet image so a whole action sequence can be reviewed in a single `Read`. See "Standing workflow" below. |
+| `modes.py`, `clicker.py`, `replay.py`, `overlay.py`, `admin_panel.py` | Unchanged this session, but see "How the pieces relate" below — this session clarified how they fit together, which wasn't written down before. |
+
+### How the pieces relate (they all read the same live state — nothing here is a separate data source)
+
+- `dual_tracker.py` is the only writer. Everything else only reads its output files (`.live_screen_state.json`, `.live_frame.jpg`, the history/log files).
+- `overlay.py` and `admin_panel.py` are human-facing views of that same JSON — not independent sources.
+- `clicker.py`'s `Clicker` class performs actions (click/drag/scroll/type) and independently re-verifies foreground focus **before every single action** via `_guard()` → `focus()` when `verify=True` (the default). This is generic — it works by window title for any app, nothing Blender-specific about it.
+- `frame_capture.py` only watches `.live_frame.jpg`'s mtime (not size — two different real writes can be byte-identical in size; see §13) and copies each new one into a session folder, then tiles them into one sheet.
+- `replay.py` is a **different, older mechanism** — it reconstructs images from the compressed 1600x pixel grid in `.tracker_frame_log.jsonl`, not the real JPEG. Good for a human scrubbing a long history cheaply; NOT for verifying whether a click landed (not detailed enough) - use `frame_capture.py` for that.
+
+### Switches currently active (persist on disk, gitignored, per-machine)
+
+- `.tracker_precision` — ON (`text_reading` mode: 48×27 grid, exact-frame JPEG written on change)
+- `.tracker_fullscreen` — ON — **always capture the true physical monitor** (`sct.monitors[1]`) regardless of any specific window's focus/minimize/overlap state. This was enabled specifically because a single-window target (e.g. `"Blender"`) silently captured the WRONG window's pixels whenever another window (this chat, in testing) overlapped and was topmost — `mss.grab()` captures screen coordinates, not window contents, so whichever window is actually topmost at that region is what gets captured, no matter which window's geometry defined the region. Fullscreen mode makes this a non-issue: it tracks the whole screen, so it doesn't matter which app has focus. **Keep this ON for any live-tracking-of-any-app work.**
+
+### The honest architecture limit (don't re-litigate this — established firmly this session)
+
+I (Claude) have no continuous/passive visual perception. I only "see" a frame the instant I call `Read` on it, during my own turn — nothing is perceived between turns or while a tool call is executing, no matter how fast the tracker writes files. This is not a tooling gap; it's how a turn-based model works, and no amount of tracker speed changes it.
+
+**What actually works, and is the standing procedure for interactive tasks (Blender or otherwise) from now on:**
+1. Before a multi-step action, start `python frame_capture.py record <seconds>` in the background.
+2. Perform the action(s) via `Clicker` (never raw `pyautogui` — `Clicker` re-verifies focus per action, generically, for any app).
+3. Build the sheet (`frame_capture.record_sheet` does both steps 1+this in one call if the duration is known upfront) and `Read` the ONE resulting contact-sheet image.
+4. **If checking whether a specific small click landed correctly, don't trust the contact-sheet thumbnail alone** — each cell is heavily downscaled (280×158 from a 1920×1080+ source) and can hide a small UI change like a dropdown opening. Crop and view the relevant single full-resolution frame from the session folder when precision matters (confirmed this session: a contact sheet appeared to show no change, but the full-resolution frame clearly showed the Add menu's dropdown open).
+
+### Picture-based coordinate accuracy (real limit, not fully solved)
+
+`Clicker.find_buttons()` and any OCR-measured coordinate are estimates from a screenshot (`vision.detect_rectangles`/OCR), not access to the target app's real UI/accessibility tree. Both `clicker.py` and `dual_tracker.py` call `SetProcessDPIAware()`, which removes the DPI-scale-mismatch class of error, but §12 already documented a case where a precisely OCR-measured button position still didn't reliably land clicks after several offset attempts. Treat any picture-derived coordinate as an estimate to verify (via the workflow above), not a guarantee.

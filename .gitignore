@@ -63,3 +63,5 @@ safe_look.jpg
 blender_now.jpg
 _strip.png
 .tracker_click_history.jsonl
+capture_sessions/
+.tracker_fullscreen
