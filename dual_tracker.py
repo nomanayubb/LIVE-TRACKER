@@ -799,7 +799,7 @@ def fast_worker(target_window_name):
                             # never opens a half-written JPEG mid-write.
                             tmp_frame = FRAME_FILE.with_suffix(".tmp.jpg")
                             cv2.imwrite(str(tmp_frame), img[:, :, :3],
-                                        [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                                        [int(cv2.IMWRITE_JPEG_QUALITY), 35])
                             os.replace(tmp_frame, FRAME_FILE)
                     except Exception:
                         pass
