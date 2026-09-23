@@ -629,3 +629,27 @@ For GUIs with unreliable coordinate-based clicking (like Blender menus), the tra
 - **NOT:** drive automated clicking based on OCR coordinates alone without additional verification
 
 **Lesson for future use:** Real-time visual data is most valuable when paired with **deterministic APIs** (Blender's `bpy`, Photoshop's scripting, any app with a stable programmatic interface), not as a replacement for missing APIs.
+
+## 13. Precision-mode real-time speed: the GIL fix (104-130ms target achieved)
+
+**Goal:** In precision mode, the real-time data cycle (pixel grid + OCR + vision + clicks, written to `.live_screen_state.json` every loop iteration) must run at 50-150ms per cycle, not seconds.
+
+**Root cause of the original slowness:** `vision_worker` and `ocr_worker` ran as `threading.Thread`s inside the same process as `fast_worker`. Python's GIL means only one thread executes Python bytecode at a time. Even though both were individually rate-limited (vision every 250ms, OCR every 400ms+), each time either one actually ran, its CPU-bound OpenCV/EasyOCR/torch work **held the GIL for its full scan duration** (40-90ms for vision, 150-300ms for OCR) and froze `fast_worker` mid-cycle — even though `fast_worker` never touches vision/OCR code. This degraded the loop from ~15ms to 300-700ms+ erratically. A code comment already documented this exact effect (measured 15ms → 175ms) before this session, but the fix at the time (throttling frequency) only reduced *how often* the stall happened, not its severity when it did.
+
+**Fix applied (commit `89eabb4`):** `vision_worker` and `ocr_worker` now run as separate `multiprocessing.Process` instances, each with its own interpreter and GIL, so their CPU-bound work can never block `fast_worker`.
+- Frame data passes from `fast_worker` to the two worker processes via `multiprocessing.shared_memory` (a fixed-size buffer sized to the primary monitor's resolution) — this avoids pickling an ~8MB frame every cycle.
+- Results (OCR text/boxes, vision scan data, pass counts) pass back via a `multiprocessing.Manager().dict()`.
+- `fast_worker(target_window_name, frame_shm, max_h, max_w, mgr_dict)` now takes these as parameters; the `if __name__ == "__main__":` block creates the shared memory block and manager dict once at startup and passes them through.
+- Result: `avg_loop_ms` (self-reported in `.live_screen_state.json`) dropped to a consistent **96-105ms**, matching the 104-130ms target.
+
+**Critical measurement lesson — don't confuse the JPG file with the data loop:** `.live_frame.jpg` (`FRAME_FILE`) is written under its own separate, additional gate (`if do_pixels and precision: ... if frame_age > 0.1 or pixel-changed: write`). It is **not** a valid proxy for how fast the real-time data cycle runs. The correct way to measure real cycle speed is either:
+1. Read `loop_ms` / `avg_loop_ms` directly from `.live_screen_state.json` (self-reported by `fast_worker`, ground truth), or
+2. Watch `.live_screen_state.json`'s file **modification time** (it's written unconditionally every single loop iteration, line ~891) — never the JPG's mtime/size for this purpose.
+
+Also: when polling a file externally (e.g. from PowerShell) to detect new writes, compare **`LastWriteTime`**, not file **size** — two consecutive JPEG encodes of a near-static screen can produce byte-identical file sizes, making a size-based poll silently miss real writes and wrongly suggest huge gaps that don't exist.
+
+**Current live tuning knobs** (`dual_tracker.py`, `fast_worker`):
+- `PIXEL_INTERVAL = 0.05` — minimum gap between fresh `mss.grab()` pixel captures.
+- Frame-write gate: `frame_age > 0.1` (100ms) OR pixel signature changed — controls `.live_frame.jpg` write frequency, independent of the JSON data loop.
+- JPEG quality: `35` (lowered from the original `92` for faster encoding; visually still fine for tracking purposes, not archival quality).
+- `vision_worker`'s `TARGET_INTERVAL = 0.25`, `ocr_worker`'s `OCR_MIN_INTERVAL = 0.4` — unchanged from before; these still throttle how often each process scans, they just no longer matter for `fast_worker`'s speed since they're isolated in their own processes now.

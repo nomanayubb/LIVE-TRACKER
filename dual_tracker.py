@@ -821,8 +821,8 @@ def fast_worker(target_window_name, frame_shm=None, max_h=0, max_w=0, mgr_dict=N
                 if do_pixels and precision:
                     try:
                         frame_age = now_input - last_frame_write_time
-                        # Write EVERY 128ms (consistent timing) OR on major pixel change
-                        if frame_age > 0.128 or (int(gray.sum()) != last_frame_sig and frame_age > 0.05):
+                        # Write EVERY 100ms (matches fast_worker's ~96-105ms loop) OR on pixel change
+                        if frame_age > 0.1 or (int(gray.sum()) != last_frame_sig and frame_age > 0.05):
                             last_frame_sig = int(gray.sum())
                             last_frame_write_time = now_input
                             tmp_frame = FRAME_FILE.with_suffix(".tmp.jpg")
